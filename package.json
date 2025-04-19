@@ -1,0 +1,39 @@
+{
+  "name": "mir4-ranking-api",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "jest",
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "API for MIR4 Power Score Rankings",
+  "dependencies": {
+    "axios": "^1.8.4",
+    "chalk": "^4.1.2",
+    "cheerio": "^1.0.0",
+    "express": "^5.1.0",
+    "node-cron": "^3.0.3",
+    "nodemon": "^3.1.9"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.x",
+    "@babel/preset-env": "^7.x",
+    "jest": "^29.x",
+    "supertest": "^6.x"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "testTimeout": 30000,
+    "testMatch": [
+      "**/tests/**/*.test.js"
+    ],
+    "collectCoverageFrom": [
+      "src/**/*.js"
+    ],
+    "coverageDirectory": "./coverage"
+  }
+}
