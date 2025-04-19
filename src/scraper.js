@@ -4,13 +4,78 @@
 
 const axios = require('axios');
 const cheerio = require('cheerio');
+const puppeteer = require('puppeteer');
 const { CHARACTER_CLASSES, HEADERS, CONFIG } = require('./config');
 const { extractImageUrlFromStyle, saveScrapedHtml } = require('./utils');
 const { getMainCache, setMainCache } = require('./cache');
 const logger = require('./logger');
 
 /**
- * Obtiene y parsea los datos del ranking de MIR4
+ * Procesa el HTML del ranking para extraer los datos de los jugadores
+ * @param {string} html - El HTML a procesar
+ * @returns {Array} - Datos de rankings procesados
+ */
+function parseRankingHtml(html) {
+    const $ = cheerio.load(html);
+    const rankings = [];
+
+    // Seleccionar las filas del ranking
+    $('tr.list_article').each((index, element) => {
+        try {
+            const $row = $(element);
+            
+            // Extraer rank (número de ranking)
+            const rankElement = $row.find('.rank_num .num');
+            const rank = rankElement.text().trim();
+            
+            // Extraer character y la URL de la imagen
+            const characterElement = $row.find('.user_name');
+            const character = characterElement.text().trim();
+            
+            const userIconElement = $row.find('.user_icon');
+            const styleAttr = userIconElement.attr('style');
+            const imgUrl = extractImageUrlFromStyle(styleAttr);
+            const characterClass = imgUrl ? (CHARACTER_CLASSES[imgUrl] || 'Desconocido') : 'Desconocido';
+            
+            // Extraer server
+            const serverElement = $row.find('td:nth-child(3) span');
+            const server = serverElement.text().trim();
+            
+            // Extraer clan
+            const clanElement = $row.find('td:nth-child(4) span');
+            const clan = clanElement.text().trim();
+            
+            // Extraer powerScore
+            const powerScoreElement = $row.find('td.text_right span');
+            const powerScoreText = powerScoreElement.text().trim();
+            const powerScore = powerScoreText ? parseInt(powerScoreText.replace(/,/g, '')) : 0;
+            
+            if (rank && character) {
+                const playerData = {
+                    rank: parseInt(rank) || index + 1,
+                    character,
+                    class: characterClass,
+                    imageUrl: imgUrl,
+                    server,
+                    clan,
+                    powerScore
+                };
+                
+                rankings.push(playerData);
+                if (parseInt(rank) <= 5 || parseInt(rank) % 50 === 0) { // Limitar el logging
+                    logger.debug(`Rank ${rank}: ${character} (${characterClass})`, 'Scraper');
+                }
+            }
+        } catch (rowError) {
+            logger.error(`Error procesando fila: ${rowError}`, 'Scraper');
+        }
+    });
+
+    return rankings;
+}
+
+/**
+ * Obtiene y parsea los datos del ranking de MIR4 usando Puppeteer para cargar todos los jugadores
  * @param {boolean} forceRefresh - Si es true, ignora el caché y hace un nuevo scraping
  * @returns {Promise<Array>} - Datos de rankings procesados
  */
@@ -20,91 +85,159 @@ async function fetchRankingData(forceRefresh = false) {
         if (!forceRefresh) {
             const cachedData = getMainCache();
             if (cachedData) {
+                logger.scraper(`Usando datos en caché (${cachedData.length} jugadores)`);
                 return cachedData;
             }
         }
         
-        logger.scraper('Obteniendo datos del ranking desde la fuente...');
-        const response = await axios.get(CONFIG.RANKING_URL, {
-            headers: HEADERS
+        logger.scraper('Iniciando scraping completo del ranking desde la fuente...');
+        
+        // Iniciar el navegador
+        const browser = await puppeteer.launch({
+            headless: CONFIG.BROWSER_HEADLESS,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-web-security']
         });
         
-        // Guardar el HTML scrapeado
-        await saveScrapedHtml(response.data);
+        const page = await browser.newPage();
+        await page.setViewport({ width: 1280, height: 800 });
         
-        const $ = cheerio.load(response.data);
-        const rankings = [];
-
-        // Seleccionar las filas del ranking
-        $('tr.list_article').each((index, element) => {
+        // Establecer los headers
+        await page.setExtraHTTPHeaders(HEADERS);
+        
+        try {
+            // Navegar a la página de ranking
+            logger.scraper(`Navegando a ${CONFIG.RANKING_URL}`);
+            await page.goto(CONFIG.RANKING_URL, { 
+                waitUntil: 'networkidle2',
+                timeout: 60000
+            });
+            
+            // Aceptar cookies si aparece el diálogo
             try {
-                const $row = $(element);
-                
-                // Extraer rank (número de ranking)
-                const rankElement = $row.find('.rank_num .num');
-                const rank = rankElement.text().trim();
-                
-                // Extraer character y la URL de la imagen
-                const characterElement = $row.find('.user_name');
-                const character = characterElement.text().trim();
-                
-                const userIconElement = $row.find('.user_icon');
-                const styleAttr = userIconElement.attr('style');
-                const imgUrl = extractImageUrlFromStyle(styleAttr);
-                const characterClass = imgUrl ? (CHARACTER_CLASSES[imgUrl] || 'Desconocido') : 'Desconocido';
-                
-                // Extraer server
-                const serverElement = $row.find('td:nth-child(3) span');
-                const server = serverElement.text().trim();
-                
-                // Extraer clan
-                const clanElement = $row.find('td:nth-child(4) span');
-                const clan = clanElement.text().trim();
-                
-                // Extraer powerScore
-                const powerScoreElement = $row.find('td.text_right span');
-                const powerScoreText = powerScoreElement.text().trim();
-                const powerScore = powerScoreText ? parseInt(powerScoreText.replace(/,/g, '')) : 0;
-                
-                if (rank && character) {
-                    const playerData = {
-                        rank: parseInt(rank) || index + 1,
-                        character,
-                        class: characterClass,
-                        imageUrl: imgUrl,
-                        server,
-                        clan,
-                        powerScore
-                    };
-                    
-                    rankings.push(playerData);
-                    if (index < 5 || index % 50 === 0) { // Limitar el logging para no saturar la consola
-                        logger.debug(`Rank ${rank}: ${character} (${characterClass})`, 'Scraper');
-                    }
+                logger.scraper('Comprobando si hay diálogo de cookies...');
+                const cookieButton = await page.$('button.btn_accept_cookies');
+                if (cookieButton) {
+                    await cookieButton.click();
+                    logger.scraper('Aceptadas las cookies');
+                    await page.waitForTimeout(1000);
                 }
-            } catch (rowError) {
-                logger.error(`Error procesando fila: ${rowError}`, 'Scraper');
+            } catch (cookieError) {
+                logger.debug('No se encontró diálogo de cookies');
             }
-        });
+            
+            let currentPageHtml = await page.content();
+            let allRankings = parseRankingHtml(currentPageHtml);
+            
+            logger.scraper(`Página 1 cargada: ${allRankings.length} jugadores`);
+            
+            // Guardar el HTML inicial
+            await saveScrapedHtml(currentPageHtml);
+            
+            // Cargar más páginas haciendo clic en el botón "Ver más"
+            let pagesLoaded = 1;
+            
+            while (pagesLoaded < CONFIG.MAX_PAGES_TO_SCRAPE) {
+                try {
+                    // Comprobar si existe el botón "Ver más"
+                    logger.scraper(`Buscando botón "Ver más" con selector: ${CONFIG.LOAD_MORE_BUTTON_SELECTOR}`);
+                    
+                    // Esperar a que el botón sea visible y esté habilitado
+                    await page.waitForSelector(CONFIG.LOAD_MORE_BUTTON_SELECTOR, { 
+                        visible: true,
+                        timeout: 5000
+                    });
+                    
+                    const loadMoreButton = await page.$(CONFIG.LOAD_MORE_BUTTON_SELECTOR);
+                    if (!loadMoreButton) {
+                        logger.scraper('No hay más páginas para cargar (botón no encontrado)');
+                        break;
+                    }
+                    
+                    // Hacer clic en el botón y esperar a que se carguen los datos
+                    logger.scraper(`Haciendo clic para cargar página ${pagesLoaded + 1}...`);
+                    
+                    // Extraer el texto del botón para debugging
+                    const buttonText = await page.evaluate(button => button.textContent, loadMoreButton);
+                    logger.scraper(`Texto del botón: "${buttonText}"`);
+                    
+                    // Contar elementos antes del clic
+                    const countBefore = await page.$$eval('tr.list_article', rows => rows.length);
+                    logger.scraper(`Elementos antes del clic: ${countBefore}`);
+                    
+                    // Hacer clic en el botón
+                    await loadMoreButton.click();
+                    
+                    // Esperar a que se carguen los nuevos datos (esperar a que aumente el número de filas)
+                    logger.scraper(`Esperando a que se carguen nuevos datos...`);
+                    await page.waitForFunction(
+                        (previousCount) => {
+                            const currentCount = document.querySelectorAll('tr.list_article').length;
+                            return currentCount > previousCount;
+                        },
+                        { timeout: 10000 },
+                        countBefore
+                    );
+                    
+                    // Esperar un tiempo adicional para asegurar que todo se haya cargado
+                    await page.waitForTimeout(CONFIG.WAIT_BETWEEN_CLICKS_MS);
+                    
+                    // Contar elementos después del clic
+                    const countAfter = await page.$$eval('tr.list_article', rows => rows.length);
+                    logger.scraper(`Elementos después del clic: ${countAfter} (añadidos: ${countAfter - countBefore})`);
+                    
+                    // Obtener el nuevo contenido y parsear los datos
+                    currentPageHtml = await page.content();
+                    const newRankings = parseRankingHtml(currentPageHtml);
+                    
+                    // Verificar si se obtuvieron nuevos datos
+                    if (newRankings.length <= allRankings.length) {
+                        logger.scraper(`No se obtuvieron nuevos datos (actual: ${newRankings.length}, anterior: ${allRankings.length}), deteniendo el scraping`);
+                        break;
+                    }
+                    
+                    pagesLoaded++;
+                    logger.scraper(`Página ${pagesLoaded} cargada: ${newRankings.length} jugadores en total`);
+                    
+                    // Actualizar la lista completa de rankings
+                    allRankings = newRankings;
+                    
+                    // Guardar el HTML de cada página para debugging
+                    await saveScrapedHtml(currentPageHtml, `ranking_page_${pagesLoaded}`);
+                } catch (btnError) {
+                    logger.error(`Error al cargar más páginas: ${btnError}`, 'Scraper');
+                    // Tomar una captura de pantalla para debugging
+                    await page.screenshot({path: `error_page_${pagesLoaded}.png`});
+                    logger.scraper(`Se guardó una captura de pantalla en error_page_${pagesLoaded}.png`);
+                    break;
+                }
+            }
+            
+            // Cerrar el navegador
+            await browser.close();
+            
+            if (allRankings.length === 0) {
+                logger.error('No se encontraron datos en la página', 'Scraper');
+                throw new Error('No se encontraron datos en la página');
+            }
 
-        if (rankings.length === 0) {
-            logger.error('No se encontraron datos en la página', 'Scraper');
-            throw new Error('No se encontraron datos en la página');
+            // Mostrar resumen de clases
+            const classCount = allRankings.reduce((acc, curr) => {
+                acc[curr.class] = (acc[curr.class] || 0) + 1;
+                return acc;
+            }, {});
+
+            logger.scraper(`Scraping completado exitosamente: ${allRankings.length} jugadores en total`);
+            logger.table(classCount);
+            
+            // Guardar los datos en caché para futuras consultas
+            setMainCache(allRankings);
+            
+            return allRankings;
+        } catch (pageError) {
+            logger.error(`Error en la navegación: ${pageError}`, 'Scraper');
+            await browser.close();
+            throw pageError;
         }
-
-        // Mostrar resumen de clases
-        const classCount = rankings.reduce((acc, curr) => {
-            acc[curr.class] = (acc[curr.class] || 0) + 1;
-            return acc;
-        }, {});
-
-        logger.scraper('Scraping completado exitosamente');
-        logger.table(classCount);
-        
-        // Guardar los datos en caché para futuras consultas
-        setMainCache(rankings);
-        
-        return rankings;
     } catch (error) {
         logger.error(`Error fetchRankingData: ${error.message}`, 'Scraper');
         if (error.response) {
@@ -115,5 +248,6 @@ async function fetchRankingData(forceRefresh = false) {
 }
 
 module.exports = {
-    fetchRankingData
+    fetchRankingData,
+    parseRankingHtml // Exportado para testing
 };

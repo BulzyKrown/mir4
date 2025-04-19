@@ -22,11 +22,12 @@ function extractImageUrlFromStyle(styleAttr) {
 /**
  * Guarda el HTML scrapeado en un archivo
  * @param {string} html - Contenido HTML a guardar
+ * @param {string} [customPrefix] - Prefijo personalizado para el nombre del archivo
  * @returns {string} - Ruta del archivo guardado
  */
-async function saveScrapedHtml(html) {
+async function saveScrapedHtml(html, customPrefix = 'scraped_ranking') {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const fileName = `scraped_ranking_${timestamp}.html`;
+    const fileName = `${customPrefix}_${timestamp}.html`;
     const scrapedPagesDir = path.join(process.cwd(), CONFIG.SCRAPED_PAGES_DIR);
     const filePath = path.join(scrapedPagesDir, fileName);
 

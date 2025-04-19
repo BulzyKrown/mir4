@@ -28,7 +28,11 @@ const CONFIG = {
     MAX_FILE_AGE_MS: 1 * 60 * 1000, // 1 minuto en milisegundos
     CLEANUP_CRON: '*/5 * * * *', // Cada 5 minutos
     DATA_DIR: 'data', // Directorio para archivos de datos
-    SCRAPED_PAGES_DIR: 'scraped_pages' // Directorio para páginas scrapeadas
+    SCRAPED_PAGES_DIR: 'scraped_pages', // Directorio para páginas scrapeadas
+    MAX_PAGES_TO_SCRAPE: 10, // Máximo número de páginas a scrapear (10 x 100 = 1000 jugadores)
+    LOAD_MORE_BUTTON_SELECTOR: '#btn_morelist', // Selector correcto del botón "+ To see more (100)"
+    WAIT_BETWEEN_CLICKS_MS: 2000, // Tiempo de espera entre clics en el botón "Ver más"
+    BROWSER_HEADLESS: true // Ejecutar el navegador en modo headless
 };
 
 module.exports = {
