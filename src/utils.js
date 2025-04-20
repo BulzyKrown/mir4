@@ -44,50 +44,71 @@ async function saveScrapedHtml(html, customPrefix = 'scraped_ranking') {
 }
 
 /**
- * Elimina archivos HTML antiguos (mayores al tiempo configurado)
+ * Elimina archivos HTML antiguos (mayores al tiempo configurado) y archivos PNG
  */
 function cleanupOldFiles() {
     try {
+        // Limpieza de archivos HTML en el directorio de páginas scrapeadas
         const scrapedPagesDir = path.join(process.cwd(), CONFIG.SCRAPED_PAGES_DIR);
+        let removedHtmlCount = 0;
         
         // Verificar si el directorio existe
-        if (!fs.existsSync(scrapedPagesDir)) {
+        if (fs.existsSync(scrapedPagesDir)) {
+            const currentTime = new Date().getTime();
+            const maxAgeMs = CONFIG.MAX_FILE_AGE_MS;
+            
+            // Leer todos los archivos en el directorio
+            const files = fs.readdirSync(scrapedPagesDir);
+            logger.info(`Revisando ${files.length} archivos HTML para limpieza...`, 'Sistema');
+            
+            files.forEach(file => {
+                const filePath = path.join(scrapedPagesDir, file);
+                
+                // Verificar si es un archivo HTML
+                if (file.endsWith('.html')) {
+                    const stats = fs.statSync(filePath);
+                    const fileAge = currentTime - stats.mtimeMs;
+                    
+                    // Si el archivo es más antiguo que el tiempo máximo permitido, eliminarlo
+                    if (fileAge > maxAgeMs) {
+                        fs.unlinkSync(filePath);
+                        logger.warn(`Archivo eliminado: ${file} (antigüedad: ${Math.round(fileAge/1000)} segundos)`, 'Sistema');
+                        removedHtmlCount++;
+                    }
+                }
+            });
+        } else {
             logger.warn(`El directorio ${CONFIG.SCRAPED_PAGES_DIR} no existe.`, 'Sistema');
-            return;
         }
         
-        const currentTime = new Date().getTime();
-        const maxAgeMs = CONFIG.MAX_FILE_AGE_MS;
-        let removedCount = 0;
+        // Limpieza de archivos PNG en el directorio raíz
+        const rootDir = process.cwd();
+        let removedPngCount = 0;
         
-        // Leer todos los archivos en el directorio
-        const files = fs.readdirSync(scrapedPagesDir);
-        logger.info(`Revisando ${files.length} archivos para limpieza...`, 'Sistema');
+        // Leer todos los archivos en el directorio raíz
+        const rootFiles = fs.readdirSync(rootDir);
+        logger.info(`Buscando archivos PNG en el directorio raíz...`, 'Sistema');
         
-        files.forEach(file => {
-            const filePath = path.join(scrapedPagesDir, file);
+        rootFiles.forEach(file => {
+            const filePath = path.join(rootDir, file);
             
-            // Verificar si es un archivo HTML
-            if (file.endsWith('.html')) {
-                const stats = fs.statSync(filePath);
-                const fileAge = currentTime - stats.mtimeMs;
-                
-                // Si el archivo es más antiguo que el tiempo máximo permitido, eliminarlo
-                if (fileAge > maxAgeMs) {
-                    fs.unlinkSync(filePath);
-                    logger.warn(`Archivo eliminado: ${file} (antigüedad: ${Math.round(fileAge/1000)} segundos)`, 'Sistema');
-                    removedCount++;
-                }
+            // Verificar si es un archivo PNG
+            if (file.endsWith('.png')) {
+                // Eliminar archivo PNG sin importar su antigüedad
+                fs.unlinkSync(filePath);
+                logger.warn(`Archivo PNG eliminado: ${file}`, 'Sistema');
+                removedPngCount++;
             }
         });
         
-        if (removedCount > 0) {
-            logger.success(`Limpieza completada: ${removedCount} archivos eliminados`, 'Sistema');
+        // Mostrar resumen de la limpieza
+        if (removedHtmlCount > 0 || removedPngCount > 0) {
+            logger.success(`Limpieza completada: ${removedHtmlCount} archivos HTML y ${removedPngCount} archivos PNG eliminados`, 'Sistema');
         } else {
             logger.info('Limpieza completada: No se eliminaron archivos', 'Sistema');
         }
     } catch (error) {
-        logger.error(`Error al limpiar archivos antiguos: ${error.message}`, 'Sistema');
+        logger.error(`Error al limpiar archivos: ${error.message}`, 'Sistema');
     }
 }
 
