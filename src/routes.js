@@ -5,7 +5,7 @@
 const express = require('express');
 const { fetchRankingData, fetchServerRankingData, buildServerUrl } = require('./scraper');
 const { getQueryCache, setQueryCache, clearCache, getCacheStats, getServerCache } = require('./cache');
-const { SERVER_REGIONS } = require('./config');
+const { SERVER_REGIONS, CONFIG } = require('./config');
 const logger = require('./logger');
 
 const router = express.Router();
@@ -483,5 +483,120 @@ router.post('/cache/clear', (req, res) => {
         res.status(500).json({ error: 'Error al limpiar el caché' });
     }
 });
+
+// NUEVOS ENDPOINTS PARA LA GESTIÓN DEL PREFETCH
+
+// Importar el módulo de prefetch
+const { prefetchAllServers } = require('./prefetch');
+const fs = require('fs');
+const path = require('path');
+
+// Ruta del archivo de estado del prefetch
+const PREFETCH_STATUS_FILE = path.join(process.cwd(), CONFIG.DATA_DIR, 'prefetch_status.json');
+
+// Endpoint para ver el estado actual del prefetch
+router.get('/prefetch/status', (req, res) => {
+    try {
+        logger.route('Solicitando estado del prefetch');
+        
+        if (fs.existsSync(PREFETCH_STATUS_FILE)) {
+            const statusData = fs.readFileSync(PREFETCH_STATUS_FILE, 'utf8');
+            const status = JSON.parse(statusData);
+            
+            // Calcular tiempo desde la última actualización
+            if (status.lastCompleted) {
+                const lastCompletedDate = new Date(status.lastCompleted);
+                status.timeSinceLastUpdate = {
+                    ms: Date.now() - lastCompletedDate.getTime(),
+                    formatted: getTimeDifferenceFormatted(lastCompletedDate)
+                };
+                
+                // Calcular próxima actualización programada
+                const nextUpdateTime = new Date(lastCompletedDate.getTime() + CONFIG.SERVER_CACHE_TTL);
+                status.nextScheduledUpdate = {
+                    timestamp: nextUpdateTime.toISOString(),
+                    in: getTimeDifferenceFormatted(new Date(), nextUpdateTime)
+                };
+            }
+            
+            logger.success('Estado del prefetch enviado', 'API');
+            res.json(status);
+        } else {
+            logger.warn('No se encontró archivo de estado del prefetch', 'API');
+            res.json({
+                error: 'No hay información de estado del prefetch',
+                isRunning: false
+            });
+        }
+    } catch (error) {
+        logger.error(`Error al obtener estado del prefetch: ${error.message}`, 'API');
+        res.status(500).json({ error: 'Error al obtener el estado del prefetch' });
+    }
+});
+
+// Endpoint para iniciar manualmente un prefetch
+router.post('/prefetch/start', (req, res) => {
+    try {
+        logger.route('Solicitando inicio manual del prefetch');
+        
+        // Verificar si hay un prefetch en ejecución
+        let isRunning = false;
+        if (fs.existsSync(PREFETCH_STATUS_FILE)) {
+            const statusData = fs.readFileSync(PREFETCH_STATUS_FILE, 'utf8');
+            const status = JSON.parse(statusData);
+            isRunning = status.isRunning;
+        }
+        
+        if (isRunning) {
+            logger.warn('Se solicitó prefetch pero ya hay uno en ejecución', 'API');
+            return res.status(409).json({ 
+                error: 'Ya hay un proceso de prefetch en ejecución',
+                message: 'Espera a que termine el proceso actual antes de iniciar uno nuevo' 
+            });
+        }
+        
+        // Iniciar el prefetch en segundo plano
+        logger.info('Iniciando prefetch manual', 'API');
+        
+        // No esperar a que termine, ejecutar en segundo plano
+        prefetchAllServers().catch(err => {
+            logger.error(`Error en prefetch manual: ${err.message}`, 'API');
+        });
+        
+        res.json({ 
+            success: true,
+            message: 'Proceso de prefetch iniciado exitosamente',
+            note: 'Este proceso se ejecuta en segundo plano y puede tardar varios minutos en completarse'
+        });
+    } catch (error) {
+        logger.error(`Error al iniciar prefetch: ${error.message}`, 'API');
+        res.status(500).json({ error: 'Error al iniciar el proceso de prefetch' });
+    }
+});
+
+/**
+ * Obtiene una representación legible de la diferencia de tiempo entre dos fechas
+ * @param {Date} startDate - Fecha de inicio
+ * @param {Date} endDate - Fecha de fin (opcional, por defecto es la fecha actual)
+ * @returns {string} - Diferencia de tiempo en formato legible
+ */
+function getTimeDifferenceFormatted(startDate, endDate = new Date()) {
+    const diff = Math.abs(endDate - startDate);
+    
+    const seconds = Math.floor(diff / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+    
+    if (days > 0) {
+        return `${days} día(s) y ${hours % 24} hora(s)`;
+    } else if (hours > 0) {
+        return `${hours} hora(s) y ${minutes % 60} minuto(s)`;
+    } else if (minutes > 0) {
+        return `${minutes} minuto(s) y ${seconds % 60} segundo(s)`;
+    } else {
+        return `${seconds} segundo(s)`;
+    }
+}
 
 module.exports = router;

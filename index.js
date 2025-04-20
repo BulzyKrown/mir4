@@ -7,6 +7,7 @@ const cron = require('node-cron');
 const { CONFIG } = require('./src/config');
 const { cleanupOldFiles } = require('./src/utils');
 const { fetchRankingData } = require('./src/scraper');
+const { initPrefetch, prefetchAllServers } = require('./src/prefetch');
 const apiRoutes = require('./src/routes');
 const logger = require('./src/logger');
 
@@ -45,6 +46,15 @@ cron.schedule(CONFIG.CLEANUP_CRON, () => {
     cleanupOldFiles();
 });
 
+// Inicializar el sistema de prefetch
+const prefetchSystem = initPrefetch();
+
+// Programar el prefetch automático cada 12 horas
+cron.schedule(CONFIG.PREFETCH_CRON, () => {
+    logger.system(`Ejecutando prefetch programado de servidores (cron: ${CONFIG.PREFETCH_CRON})`);
+    prefetchAllServers();
+});
+
 // Ejecutar una búsqueda inicial al iniciar para probar el sistema
 if (process.env.NODE_ENV !== 'test') {
     // Ejecutar inmediatamente un test de fetchRankingData
@@ -52,6 +62,12 @@ if (process.env.NODE_ENV !== 'test') {
     fetchRankingData()
         .then(() => logger.success('Carga inicial completada exitosamente', 'Sistema'))
         .catch(err => logger.error(`Error en carga inicial: ${err.message}`, 'Sistema'));
+    
+    // Iniciar el prefetch inicial después de un breve retraso para no saturar recursos al inicio
+    setTimeout(() => {
+        logger.system('Iniciando prefetch inicial de servidores...');
+        prefetchAllServers();
+    }, 10000);
 }
 
 // Iniciar el servidor solo si no estamos en modo test
@@ -61,6 +77,7 @@ if (process.env.NODE_ENV !== 'test') {
     app.listen(port, () => {
         logger.success(`API de rankings MIR4 corriendo en http://localhost:${port}`, 'Sistema');
         logger.info(`Limpieza de archivos programada: ${CONFIG.CLEANUP_CRON}`, 'Sistema');
+        logger.info(`Prefetch automático programado: ${CONFIG.PREFETCH_CRON}`, 'Sistema');
         
         // Ejecutar una limpieza inicial al iniciar el servidor
         cleanupOldFiles();

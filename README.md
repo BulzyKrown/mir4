@@ -111,6 +111,45 @@ Retorna estadísticas generales incluyendo:
 - Distribución por servidor
 - Distribución por clase
 
+### Nuevos Endpoints
+
+### Obtener últimos datos cargados
+```http
+GET /api/latest
+```
+Retorna información sobre el último conjunto de datos cargados, incluyendo timestamp y servidores procesados.
+
+### Refrescar datos de todos los servidores
+```http
+GET /api/refresh
+```
+Fuerza una actualización de todos los datos de ranking de todos los servidores disponibles.
+
+### Obtener datos de un servidor específico
+```http
+GET /api/server/:regionName/:serverName
+```
+| Parámetro | Tipo | Descripción |
+| :--- | :--- | :--- |
+| `regionName` | `string` | Nombre de la región (ej: ASIA1, EU1, SA2, etc.) |
+| `serverName` | `string` | Nombre del servidor (ej: ASIA013, EU021, SA052, etc.) |
+
+### Obtener estado de la recolección de datos
+```http
+GET /api/status
+```
+Retorna el estado actual de la recolección de datos, incluyendo servidores completados y en progreso.
+
+### Debug del parser de HTML
+```http
+GET /api/debug/:fileId
+```
+| Parámetro | Tipo | Descripción |
+| :--- | :--- | :--- |
+| `fileId` | `string` | Identificador del archivo HTML almacenado (por ejemplo: "SA2_SA052_page_6") |
+
+Retorna el resultado del parser sobre un archivo HTML específico, útil para depuración.
+
 ## Nuevas funcionalidades para múltiples servidores
 
 ### Listar todos los servidores disponibles

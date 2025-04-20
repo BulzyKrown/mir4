@@ -153,7 +153,8 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
                 if (cookieButton) {
                     await cookieButton.click();
                     logger.scraper('Aceptadas las cookies');
-                    await page.waitForTimeout(1000);
+                    // Reemplazar waitForTimeout con una espera usando setTimeout
+                    await new Promise(resolve => setTimeout(resolve, 1000));
                 }
             } catch (cookieError) {
                 logger.debug('No se encontró diálogo de cookies');
@@ -215,7 +216,8 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
                     );
                     
                     // Esperar un tiempo adicional para asegurar que todo se haya cargado
-                    await page.waitForTimeout(CONFIG.WAIT_BETWEEN_CLICKS_MS);
+                    // Reemplazar waitForTimeout con una espera usando setTimeout
+                    await new Promise(resolve => setTimeout(resolve, CONFIG.WAIT_BETWEEN_CLICKS_MS));
                     
                     // Contar elementos después del clic
                     const countAfter = await page.$$eval('tr.list_article', rows => rows.length);
@@ -335,7 +337,8 @@ async function fetchRankingData(forceRefresh = false) {
                 if (cookieButton) {
                     await cookieButton.click();
                     logger.scraper('Aceptadas las cookies');
-                    await page.waitForTimeout(1000);
+                    // Reemplazar waitForTimeout con una espera usando setTimeout
+                    await new Promise(resolve => setTimeout(resolve, 1000));
                 }
             } catch (cookieError) {
                 logger.debug('No se encontró diálogo de cookies');
@@ -395,7 +398,8 @@ async function fetchRankingData(forceRefresh = false) {
                     );
                     
                     // Esperar un tiempo adicional para asegurar que todo se haya cargado
-                    await page.waitForTimeout(CONFIG.WAIT_BETWEEN_CLICKS_MS);
+                    // Reemplazar waitForTimeout con una espera usando setTimeout
+                    await new Promise(resolve => setTimeout(resolve, CONFIG.WAIT_BETWEEN_CLICKS_MS));
                     
                     // Contar elementos después del clic
                     const countAfter = await page.$$eval('tr.list_article', rows => rows.length);

@@ -315,7 +315,9 @@ const CONFIG = {
     MAX_PAGES_TO_SCRAPE: 10, // Máximo número de páginas a scrapear (10 x 100 = 1000 jugadores)
     LOAD_MORE_BUTTON_SELECTOR: '#btn_morelist', // Selector correcto del botón "+ To see more (100)"
     WAIT_BETWEEN_CLICKS_MS: 2000, // Tiempo de espera entre clics en el botón "Ver más"
-    BROWSER_HEADLESS: true // Ejecutar el navegador en modo headless
+    BROWSER_HEADLESS: true, // Ejecutar el navegador en modo headless
+    SERVER_CACHE_TTL: 12 * 60 * 60 * 1000, // 12 horas en milisegundos para el caché de servidores
+    PREFETCH_CRON: '0 */12 * * *' // Cada 12 horas (a las 00:00 y 12:00)
 };
 
 module.exports = {

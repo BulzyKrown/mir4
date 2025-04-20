@@ -3,11 +3,14 @@
  */
 
 const logger = require('./logger');
+const { CONFIG } = require('./config');
 
 // Configuración de caché
 const CACHE_CONFIG = {
-    // Tiempo de vida de los datos en caché (5 minutos en milisegundos)
+    // Tiempo de vida de los datos en caché para consultas generales (5 minutos en milisegundos)
     TTL: 5 * 60 * 1000,
+    // Tiempo de vida del caché para servidores (12 horas en milisegundos)
+    SERVER_TTL: CONFIG.SERVER_CACHE_TTL,
     // Límite de entradas en el caché (evita crecimiento excesivo de memoria)
     MAX_ENTRIES: 50
 };
@@ -28,11 +31,12 @@ const queryCache = new Map();
 /**
  * Verifica si el caché ha expirado
  * @param {number} timestamp - Timestamp cuando se almacenó en caché
+ * @param {number} ttl - Tiempo de vida del caché en milisegundos
  * @returns {boolean} - true si el caché expiró, false si sigue válido
  */
-function isCacheExpired(timestamp) {
+function isCacheExpired(timestamp, ttl = CACHE_CONFIG.TTL) {
     if (!timestamp) return true;
-    return Date.now() - timestamp > CACHE_CONFIG.TTL;
+    return Date.now() - timestamp > ttl;
 }
 
 /**
@@ -111,7 +115,8 @@ function getServerCache(serverKey) {
     
     const cacheEntry = serverCache.get(serverKey);
     
-    if (isCacheExpired(cacheEntry.timestamp)) {
+    // Usar TTL específico para servidores (12 horas)
+    if (isCacheExpired(cacheEntry.timestamp, CACHE_CONFIG.SERVER_TTL)) {
         logger.warn(`Datos de servidor expirados: ${serverKey}`, 'Cache');
         serverCache.delete(serverKey);
         return null;
@@ -210,12 +215,14 @@ function getCacheStats() {
         },
         serverCache: {
             size: serverCache.size,
-            keys: Array.from(serverCache.keys())
+            keys: Array.from(serverCache.keys()),
+            ttlMs: CACHE_CONFIG.SERVER_TTL
         },
         queryCache: {
             size: queryCache.size,
             maxSize: CACHE_CONFIG.MAX_ENTRIES,
-            keys: Array.from(queryCache.keys())
+            keys: Array.from(queryCache.keys()),
+            ttlMs: CACHE_CONFIG.TTL
         },
         config: {
             ttlMs: CACHE_CONFIG.TTL
