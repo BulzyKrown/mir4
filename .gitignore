@@ -53,3 +53,9 @@ out/
 # Archivos específicos del proyecto
 data/*.json
 data/temp/
+
+# Archivos de imagen
+*.png
+*.jpg
+*.jpeg
+*.gif

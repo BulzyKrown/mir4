@@ -3,8 +3,9 @@
  */
 
 const express = require('express');
-const { fetchRankingData } = require('./scraper');
-const { getQueryCache, setQueryCache, clearCache, getCacheStats } = require('./cache');
+const { fetchRankingData, fetchServerRankingData, buildServerUrl } = require('./scraper');
+const { getQueryCache, setQueryCache, clearCache, getCacheStats, getServerCache } = require('./cache');
+const { SERVER_REGIONS } = require('./config');
 const logger = require('./logger');
 
 const router = express.Router();
@@ -200,6 +201,257 @@ router.get('/rankings/stats', async (req, res) => {
     } catch (error) {
         logger.error(`Error al obtener estadísticas: ${error.message}`, 'API');
         res.status(500).json({ error: 'Error al obtener las estadísticas' });
+    }
+});
+
+// NUEVOS ENDPOINTS PARA SERVIDOR ESPECÍFICO
+
+// Endpoint para listar todas las regiones y servidores disponibles
+router.get('/servers', (req, res) => {
+    try {
+        logger.route('Solicitando lista de servidores disponibles');
+        
+        const serverList = {};
+        
+        // Convertir el objeto de regiones a un formato más amigable para la API
+        for (const [regionName, regionData] of Object.entries(SERVER_REGIONS)) {
+            serverList[regionName] = {
+                id: regionData.id,
+                servers: Object.keys(regionData.servers).map(serverName => ({
+                    id: regionData.servers[serverName].id,
+                    name: serverName,
+                    url: buildServerUrl(regionName, serverName)
+                }))
+            };
+        }
+        
+        logger.success('Lista de servidores enviada', 'API');
+        res.json(serverList);
+    } catch (error) {
+        logger.error(`Error al obtener lista de servidores: ${error.message}`, 'API');
+        res.status(500).json({ error: 'Error al obtener la lista de servidores' });
+    }
+});
+
+// Endpoint para obtener el ranking de un servidor específico
+router.get('/rankings/region/:region/server/:server', async (req, res) => {
+    try {
+        const regionName = req.params.region.toUpperCase();
+        const serverName = req.params.server.toUpperCase();
+        
+        logger.route(`Solicitando ranking para servidor específico: ${regionName} > ${serverName}`);
+        
+        // Verificar si la región y servidor existen
+        if (!SERVER_REGIONS[regionName]) {
+            logger.warn(`Región solicitada no existe: ${regionName}`, 'API');
+            return res.status(404).json({ error: `La región '${regionName}' no está registrada en el sistema` });
+        }
+        
+        if (!SERVER_REGIONS[regionName].servers[serverName]) {
+            logger.warn(`Servidor solicitado no existe: ${serverName} en región ${regionName}`, 'API');
+            return res.status(404).json({ error: `El servidor '${serverName}' no está registrado en la región '${regionName}'` });
+        }
+        
+        // Obtener los datos
+        const forceRefresh = req.query.refresh === 'true';
+        const rankings = await fetchServerRankingData(regionName, serverName, forceRefresh);
+        
+        logger.success(`Rankings de servidor enviados: ${rankings.length} registros de ${regionName} > ${serverName}`, 'API');
+        res.json(rankings);
+    } catch (error) {
+        logger.error(`Error al obtener ranking de servidor: ${error.message}`, 'API');
+        res.status(500).json({ error: 'Error al obtener los rankings del servidor' });
+    }
+});
+
+// Endpoint para buscar un personaje en todos los servidores registrados
+router.get('/rankings/search/:characterName', async (req, res) => {
+    try {
+        const characterName = req.params.characterName;
+        const cacheKey = `search_${characterName.toLowerCase()}`;
+        
+        logger.route(`Buscando personaje en todos los servidores: ${characterName}`);
+        
+        // Intentar obtener del caché
+        const cachedResult = getQueryCache(cacheKey);
+        if (cachedResult) {
+            logger.success(`Resultados de búsqueda desde caché para '${characterName}': ${cachedResult.length} resultados`, 'API');
+            return res.json(cachedResult);
+        }
+        
+        // Buscar en todas las regiones y servidores
+        const results = [];
+        const searchPromises = [];
+        
+        // Primera búsqueda en el ranking principal (si está disponible)
+        try {
+            const mainRankings = getServerCache('main');
+            if (mainRankings) {
+                const matches = mainRankings.filter(player => 
+                    player.character.toLowerCase().includes(characterName.toLowerCase())
+                );
+                results.push(...matches);
+            }
+        } catch (e) {
+            logger.debug('No hay datos en caché principal para buscar');
+        }
+        
+        // Preparar promesas para buscar en cada servidor
+        for (const [regionName, regionData] of Object.entries(SERVER_REGIONS)) {
+            for (const [serverName] of Object.entries(regionData.servers)) {
+                // Verificar si ya tenemos datos en caché para este servidor
+                const serverKey = `${regionName}_${serverName}`;
+                const cachedServerData = getServerCache(serverKey);
+                
+                if (cachedServerData) {
+                    // Si tenemos datos en caché, filtrar directamente
+                    const matches = cachedServerData.filter(player => 
+                        player.character.toLowerCase().includes(characterName.toLowerCase())
+                    );
+                    
+                    // Agregar información de región/servidor a cada resultado
+                    const enhancedMatches = matches.map(player => ({
+                        ...player,
+                        regionName,
+                        serverName
+                    }));
+                    
+                    results.push(...enhancedMatches);
+                } else {
+                    // Si no hay caché, preparar una promesa para buscar en este servidor
+                    const serverPromise = fetchServerRankingData(regionName, serverName)
+                        .then(rankings => {
+                            const matches = rankings.filter(player => 
+                                player.character.toLowerCase().includes(characterName.toLowerCase())
+                            );
+                            
+                            // Agregar información de región/servidor a cada resultado
+                            const enhancedMatches = matches.map(player => ({
+                                ...player,
+                                regionName,
+                                serverName
+                            }));
+                            
+                            results.push(...enhancedMatches);
+                            
+                            logger.debug(`Encontrados ${matches.length} resultados en ${regionName} > ${serverName}`);
+                            return matches;
+                        })
+                        .catch(err => {
+                            logger.error(`Error al buscar en ${regionName} > ${serverName}: ${err.message}`, 'API');
+                            return [];
+                        });
+                    
+                    searchPromises.push(serverPromise);
+                }
+            }
+        }
+        
+        // Esperar a que todas las búsquedas terminen
+        if (searchPromises.length > 0) {
+            await Promise.all(searchPromises);
+        }
+        
+        // Ordenar resultados por PowerScore descendente
+        results.sort((a, b) => b.powerScore - a.powerScore);
+        
+        // Guardar en caché para futuras consultas
+        setQueryCache(cacheKey, results);
+        
+        logger.success(`Búsqueda completada para '${characterName}': ${results.length} resultados encontrados`, 'API');
+        res.json(results);
+    } catch (error) {
+        logger.error(`Error al buscar personaje: ${error.message}`, 'API');
+        res.status(500).json({ error: 'Error al buscar el personaje en los servidores' });
+    }
+});
+
+// Endpoint para buscar jugadores por clan en todos los servidores
+router.get('/rankings/clan-global/:clanName', async (req, res) => {
+    try {
+        const clanName = req.params.clanName;
+        const cacheKey = `clan_global_${clanName.toLowerCase()}`;
+        
+        logger.route(`Buscando clan en todos los servidores: ${clanName}`);
+        
+        // Intentar obtener del caché
+        const cachedResult = getQueryCache(cacheKey);
+        if (cachedResult) {
+            logger.success(`Resultados de búsqueda de clan desde caché para '${clanName}': ${cachedResult.length} resultados`, 'API');
+            return res.json(cachedResult);
+        }
+        
+        // Buscar en todas las regiones y servidores
+        const results = [];
+        const searchPromises = [];
+        
+        // Preparar promesas para buscar en cada servidor
+        for (const [regionName, regionData] of Object.entries(SERVER_REGIONS)) {
+            for (const [serverName] of Object.entries(regionData.servers)) {
+                // Verificar si ya tenemos datos en caché para este servidor
+                const serverKey = `${regionName}_${serverName}`;
+                const cachedServerData = getServerCache(serverKey);
+                
+                if (cachedServerData) {
+                    // Si tenemos datos en caché, filtrar directamente
+                    const matches = cachedServerData.filter(player => 
+                        player.clan.toLowerCase().includes(clanName.toLowerCase())
+                    );
+                    
+                    // Agregar información de región/servidor a cada resultado
+                    const enhancedMatches = matches.map(player => ({
+                        ...player,
+                        regionName,
+                        serverName
+                    }));
+                    
+                    results.push(...enhancedMatches);
+                } else {
+                    // Si no hay caché, preparar una promesa para buscar en este servidor
+                    const serverPromise = fetchServerRankingData(regionName, serverName)
+                        .then(rankings => {
+                            const matches = rankings.filter(player => 
+                                player.clan.toLowerCase().includes(clanName.toLowerCase())
+                            );
+                            
+                            // Agregar información de región/servidor a cada resultado
+                            const enhancedMatches = matches.map(player => ({
+                                ...player,
+                                regionName,
+                                serverName
+                            }));
+                            
+                            results.push(...enhancedMatches);
+                            
+                            logger.debug(`Encontrados ${matches.length} resultados para clan '${clanName}' en ${regionName} > ${serverName}`);
+                            return matches;
+                        })
+                        .catch(err => {
+                            logger.error(`Error al buscar clan en ${regionName} > ${serverName}: ${err.message}`, 'API');
+                            return [];
+                        });
+                    
+                    searchPromises.push(serverPromise);
+                }
+            }
+        }
+        
+        // Esperar a que todas las búsquedas terminen
+        if (searchPromises.length > 0) {
+            await Promise.all(searchPromises);
+        }
+        
+        // Ordenar resultados por PowerScore descendente
+        results.sort((a, b) => b.powerScore - a.powerScore);
+        
+        // Guardar en caché para futuras consultas
+        setQueryCache(cacheKey, results);
+        
+        logger.success(`Búsqueda de clan completada para '${clanName}': ${results.length} resultados encontrados`, 'API');
+        res.json(results);
+    } catch (error) {
+        logger.error(`Error al buscar clan: ${error.message}`, 'API');
+        res.status(500).json({ error: 'Error al buscar el clan en los servidores' });
     }
 });
 

@@ -19,6 +19,9 @@ let rankingCache = {
     hits: 0              // Contador de hits al caché
 };
 
+// Cache para resultados de servidores específicos
+const serverCache = new Map();
+
 // Cache para consultas específicas (server, clan, class, range, etc.)
 const queryCache = new Map();
 
@@ -58,6 +61,65 @@ function getMainCache() {
     rankingCache.hits++;
     logger.success(`HIT caché principal (hits: ${rankingCache.hits})`, 'Cache');
     return rankingCache.data;
+}
+
+/**
+ * Almacena datos de un servidor específico en caché
+ * @param {string} serverKey - Clave del servidor (regionName_serverName)
+ * @param {Array} data - Datos a almacenar en caché
+ */
+function setServerCache(serverKey, data) {
+    // Limpiar caché si excede el tamaño máximo
+    if (serverCache.size >= CACHE_CONFIG.MAX_ENTRIES) {
+        // Encontrar la entrada más antigua para eliminar
+        let oldestKey = null;
+        let oldestTime = Date.now();
+        
+        for (const [k, entry] of serverCache.entries()) {
+            if (entry.timestamp < oldestTime) {
+                oldestTime = entry.timestamp;
+                oldestKey = k;
+            }
+        }
+        
+        if (oldestKey) {
+            serverCache.delete(oldestKey);
+            logger.warn(`Eliminada entrada de servidor antigua: ${oldestKey}`, 'Cache');
+        }
+    }
+    
+    // Almacenar nueva entrada
+    serverCache.set(serverKey, {
+        data,
+        timestamp: Date.now(),
+        hits: 0
+    });
+    
+    logger.cache(`Datos de servidor cacheados: ${serverKey} - ${data.length} registros`);
+}
+
+/**
+ * Obtiene datos de un servidor específico del caché
+ * @param {string} serverKey - Clave del servidor (regionName_serverName)
+ * @returns {Array|null} - Datos en caché o null si no existen o expiraron
+ */
+function getServerCache(serverKey) {
+    if (!serverCache.has(serverKey)) {
+        logger.debug(`MISS servidor: ${serverKey}`, 'Cache');
+        return null;
+    }
+    
+    const cacheEntry = serverCache.get(serverKey);
+    
+    if (isCacheExpired(cacheEntry.timestamp)) {
+        logger.warn(`Datos de servidor expirados: ${serverKey}`, 'Cache');
+        serverCache.delete(serverKey);
+        return null;
+    }
+    
+    cacheEntry.hits++;
+    logger.success(`HIT servidor: ${serverKey} (hits: ${cacheEntry.hits})`, 'Cache');
+    return cacheEntry.data;
 }
 
 /**
@@ -129,6 +191,7 @@ function clearCache() {
         hits: 0
     };
     
+    serverCache.clear();
     queryCache.clear();
     logger.cache(`Caché limpiado completamente`);
 }
@@ -145,6 +208,10 @@ function getCacheStats() {
             hits: rankingCache.hits,
             recordCount: rankingCache.data ? rankingCache.data.length : 0
         },
+        serverCache: {
+            size: serverCache.size,
+            keys: Array.from(serverCache.keys())
+        },
         queryCache: {
             size: queryCache.size,
             maxSize: CACHE_CONFIG.MAX_ENTRIES,
@@ -159,6 +226,8 @@ function getCacheStats() {
 module.exports = {
     setMainCache,
     getMainCache,
+    setServerCache,
+    getServerCache,
     setQueryCache,
     getQueryCache,
     clearCache,
