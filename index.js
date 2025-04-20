@@ -67,8 +67,8 @@ if (process.env.NODE_ENV !== 'test') {
     // Iniciar el prefetch inicial después de un breve retraso para no saturar recursos al inicio
     setTimeout(() => {
         logger.system('Iniciando prefetch inicial de servidores...');
-        // Forzamos la actualización en el prefetch inicial para asegurar datos actualizados al iniciar
-        prefetchAllServers({ forceUpdate: true });
+        // No forzamos la actualización para permitir que el sistema de comparación funcione
+        prefetchAllServers({ forceUpdate: false });
     }, 10000);
 }
 

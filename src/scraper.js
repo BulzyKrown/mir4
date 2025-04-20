@@ -117,6 +117,8 @@ async function shouldContinueScraping(scrapedData, regionName = null, serverName
             return true;
         }
 
+        logger.scraper(`➡️ OPTIMIZACIÓN: Iniciando comparación de datos scrapeados (${scrapedData.length} jugadores)`);
+        
         // Obtener datos existentes de la base de datos
         const existingData = regionName && serverName 
             ? getServerRankings(regionName, serverName)  // Para un servidor específico
@@ -124,21 +126,36 @@ async function shouldContinueScraping(scrapedData, regionName = null, serverName
         
         // Si no hay datos en la base de datos, debemos continuar el scraping
         if (!existingData || existingData.length === 0) {
-            logger.scraper('No hay datos existentes para comparar, continuando con el scraping completo');
+            logger.scraper(`➡️ OPTIMIZACIÓN: No hay datos existentes para comparar en ${regionName || 'caché principal'} > ${serverName || ''}. Continuando con el scraping completo`);
             return true;
+        }
+
+        logger.scraper(`➡️ OPTIMIZACIÓN: Se encontraron ${existingData.length} jugadores en ${regionName ? 'la base de datos' : 'el caché principal'} para comparar`);
+
+        // Mostrar los primeros 5 jugadores de cada conjunto para diagnóstico
+        logger.scraper('➡️ MUESTRA DE DATOS SCRAPEADOS (top 5):');
+        for (let i = 0; i < Math.min(5, scrapedData.length); i++) {
+            logger.scraper(`   [${i+1}] Rank ${scrapedData[i].rank}: ${scrapedData[i].character} (${scrapedData[i].class}) - PS: ${scrapedData[i].powerScore}`);
+        }
+        
+        logger.scraper('➡️ MUESTRA DE DATOS EXISTENTES (top 5):');
+        for (let i = 0; i < Math.min(5, existingData.length); i++) {
+            logger.scraper(`   [${i+1}] Rank ${existingData[i].rank}: ${existingData[i].character} (${existingData[i].class}) - PS: ${existingData[i].powerScore}`);
         }
 
         // Verificar si es hora del reset diario de rankings
         const now = new Date();
         const resetHour = 4; // Asumiendo que el reset es a las 4:00 UTC
         if (now.getUTCHours() === resetHour && now.getUTCMinutes() < 15) {
-            logger.scraper('Es hora del reset diario de rankings, forzando scraping completo');
+            logger.scraper('➡️ OPTIMIZACIÓN: Es hora del reset diario de rankings, forzando scraping completo');
             return true;
         }
 
         // Comparar jugadores en el top (limitado a la cantidad de datos scrapeados)
-        const comparisonLimit = Math.min(scrapedData.length, existingData.length);
+        const comparisonLimit = Math.min(scrapedData.length, existingData.length, 100); // Limitar a máximo 100 para la comparación
         let matchCount = 0;
+        let nameMatchCount = 0; // Solo para nombres, sin considerar posición
+        let detail = [];
 
         // Crear mapa de jugadores existentes por nombre para búsqueda rápida
         const existingPlayers = new Map();
@@ -152,28 +169,55 @@ async function shouldContinueScraping(scrapedData, regionName = null, serverName
             const existingPlayer = existingPlayers.get(scrapedPlayer.character);
             
             if (existingPlayer) {
-                // Considerar una coincidencia si tienen el mismo nombre y posición similar (+/- 2)
+                // El nombre coincide
+                nameMatchCount++;
+                
+                // Considerar una coincidencia si tienen el mismo nombre y posición similar (+/- 3 posiciones)
                 const rankDiff = Math.abs(scrapedPlayer.rank - existingPlayer.rank);
-                if (rankDiff <= 2) {
+                const powerDiff = Math.abs(scrapedPlayer.powerScore - existingPlayer.powerScore);
+                
+                if (rankDiff <= 3) { // Ampliamos margen a 3 posiciones
                     matchCount++;
+                    if (detail.length < 5) {
+                        detail.push(`✅ ${scrapedPlayer.character}: rank ${scrapedPlayer.rank}→${existingPlayer.rank} (diff: ${rankDiff}), PS: ${scrapedPlayer.powerScore}→${existingPlayer.powerScore}`);
+                    }
+                } else {
+                    if (detail.length < 10) {
+                        detail.push(`❌ ${scrapedPlayer.character}: rank ${scrapedPlayer.rank}→${existingPlayer.rank} (diff: ${rankDiff}), PS: ${scrapedPlayer.powerScore}→${existingPlayer.powerScore}`);
+                    }
                 }
             }
         }
 
-        // Calcular porcentaje de similitud
+        // Calcular porcentajes de similitud
         const similarityPercentage = (matchCount / comparisonLimit) * 100;
-        logger.scraper(`Similitud de datos: ${similarityPercentage.toFixed(2)}% (${matchCount} de ${comparisonLimit} coincidencias)`);
+        const nameMatchPercentage = (nameMatchCount / comparisonLimit) * 100;
+        
+        logger.scraper(`➡️ OPTIMIZACIÓN: Similitud de nombres: ${nameMatchPercentage.toFixed(2)}% (${nameMatchCount} de ${comparisonLimit} coincidencias)`);
+        logger.scraper(`➡️ OPTIMIZACIÓN: Similitud de posición: ${similarityPercentage.toFixed(2)}% (${matchCount} de ${comparisonLimit} coincidencias)`);
+        
+        // Mostrar detalles de algunas coincidencias/diferencias
+        detail.forEach(d => logger.scraper(`   ${d}`));
 
-        // Si la similitud es mayor o igual al 20%, no es necesario continuar con el scraping
-        if (similarityPercentage >= 20) {
-            logger.scraper(`Datos suficientemente similares (${similarityPercentage.toFixed(2)}%), omitiendo scraping completo`);
+        // Si la similitud de nombres es alta (>60%) pero la de posiciones es baja (<20%), 
+        // puede ser que los rankings cambiaron significativamente pero son los mismos jugadores
+        if (nameMatchPercentage >= 60 && similarityPercentage < 20) {
+            logger.scraper(`⚠️ OPTIMIZACIÓN: Alta coincidencia de nombres pero baja coincidencia de posiciones. Posible cambio significativo en el ranking.`);
+        }
+
+        // Si la similitud es mayor o igual al 80%, no es necesario continuar con el scraping
+        const SIMILARITY_THRESHOLD = 80; // Umbral de similitud aumentado a 80%
+        
+        if (similarityPercentage >= SIMILARITY_THRESHOLD) {
+            logger.scraper(`✅ OPTIMIZACIÓN: Datos suficientemente similares (${similarityPercentage.toFixed(2)}%), omitiendo scraping completo`);
             return false;
         } else {
-            logger.scraper(`Datos insuficientemente similares (${similarityPercentage.toFixed(2)}%), continuando con scraping completo`);
+            logger.scraper(`⚠️ OPTIMIZACIÓN: Datos insuficientemente similares (${similarityPercentage.toFixed(2)}%), continuando con scraping completo`);
             return true;
         }
     } catch (error) {
-        logger.error(`Error al comparar datos: ${error.message}`, 'Scraper');
+        logger.error(`❌ OPTIMIZACIÓN: Error al comparar datos: ${error.message}`, 'Scraper');
+        logger.error(error.stack);
         // En caso de error, continuamos con el scraping para asegurar datos actualizados
         return true;
     }
