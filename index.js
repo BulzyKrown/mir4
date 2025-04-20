@@ -52,7 +52,8 @@ const prefetchSystem = initPrefetch();
 // Programar el prefetch automático cada 12 horas
 cron.schedule(CONFIG.PREFETCH_CRON, () => {
     logger.system(`Ejecutando prefetch programado de servidores (cron: ${CONFIG.PREFETCH_CRON})`);
-    prefetchAllServers();
+    // No forzamos actualización en el prefetch automático para respetar el reset de rankings
+    prefetchAllServers({ forceUpdate: false });
 });
 
 // Ejecutar una búsqueda inicial al iniciar para probar el sistema
@@ -66,7 +67,8 @@ if (process.env.NODE_ENV !== 'test') {
     // Iniciar el prefetch inicial después de un breve retraso para no saturar recursos al inicio
     setTimeout(() => {
         logger.system('Iniciando prefetch inicial de servidores...');
-        prefetchAllServers();
+        // Forzamos la actualización en el prefetch inicial para asegurar datos actualizados al iniciar
+        prefetchAllServers({ forceUpdate: true });
     }, 10000);
 }
 

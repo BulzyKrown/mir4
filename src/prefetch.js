@@ -102,15 +102,74 @@ function savePrefetchStatus() {
 }
 
 /**
+ * Comprueba si los datos de un servidor ya se han actualizado después del último reset del ranking
+ * @param {string} regionName - Nombre de la región
+ * @param {string} serverName - Nombre del servidor
+ * @returns {boolean} - true si los datos ya están actualizados después del último reset
+ */
+async function isServerDataUpdatedAfterReset(regionName, serverName) {
+    try {
+        // Obtener la última actualización del servidor desde la base de datos
+        const serverData = db.prepare(`
+            SELECT MAX(r.collection_time) as last_update
+            FROM rankings r
+            JOIN servers s ON r.server_id = s.id
+            WHERE s.region_name = ? AND s.server_name = ?
+        `).get(regionName, serverName);
+        
+        if (!serverData || !serverData.last_update) {
+            // No hay datos previos, por lo que necesitamos actualizar
+            return false;
+        }
+        
+        // Convertir la última actualización a objeto Date
+        const lastUpdate = new Date(serverData.last_update);
+        
+        // Obtener la fecha y hora actual en UTC
+        const now = new Date();
+        
+        // Convertir a UTC+8 (Hora de reset de MIR4)
+        const utcPlus8Hours = now.getUTCHours() + 8;
+        // Si es mayor a 24 o negativo, ajustar
+        const adjustedHours = utcPlus8Hours >= 24 ? utcPlus8Hours - 24 : (utcPlus8Hours < 0 ? utcPlus8Hours + 24 : utcPlus8Hours);
+        
+        // Crear fecha del último reset a las 00:00 UTC+8
+        const lastResetDate = new Date(Date.UTC(
+            now.getUTCFullYear(),
+            now.getUTCMonth(),
+            // Si son menos de las 00:00 UTC+8, el último reset fue ayer
+            adjustedHours < 0 ? now.getUTCDate() - 1 : now.getUTCDate(),
+            0, 0, 0, 0
+        ));
+        // Ajustar a UTC+8
+        lastResetDate.setUTCHours(lastResetDate.getUTCHours() - 8);
+        
+        // Si la última actualización es posterior al último reset, los datos ya están actualizados
+        const isUpdated = lastUpdate >= lastResetDate;
+        
+        if (isUpdated) {
+            logger.info(`Servidor ${regionName} > ${serverName} ya tiene datos actualizados después del reset (${lastResetDate.toISOString()})`, 'Prefetch');
+        }
+        
+        return isUpdated;
+    } catch (error) {
+        logger.error(`Error al verificar actualización de datos para ${regionName} > ${serverName}: ${error.message}`, 'Prefetch');
+        return false; // En caso de error, actualizamos por precaución
+    }
+}
+
+/**
  * Realiza el prefetch de todos los servidores registrados
  * @param {Object} options - Opciones de configuración para el prefetch
  * @param {boolean} options.interactive - Si se debe preguntar al usuario antes de continuar después de errores
  * @param {number} options.confirmEvery - Número de servidores a procesar antes de pedir confirmación
+ * @param {boolean} options.forceUpdate - Si se debe forzar la actualización aunque los datos ya estén actualizados
  */
 async function prefetchAllServers(options = {}) {
     const { 
         interactive = false, 
-        confirmEvery = 5 
+        confirmEvery = 5,
+        forceUpdate = false
     } = options;
     
     // Evitar ejecuciones simultáneas
@@ -126,6 +185,7 @@ async function prefetchAllServers(options = {}) {
     prefetchStatus.lastError = null;
     prefetchStatus.serversProcessed = 0;
     prefetchStatus.paused = false;
+    prefetchStatus.skippedServers = 0; // Contador de servidores omitidos por estar actualizados
     
     // Crear lista de todos los servidores
     const servers = [];
@@ -160,6 +220,15 @@ async function prefetchAllServers(options = {}) {
         }
 
         try {
+            // Verificar si los datos ya están actualizados después del último reset (00:00 UTC+8)
+            // Solo si no estamos forzando la actualización
+            if (!forceUpdate && await isServerDataUpdatedAfterReset(server.regionName, server.serverName)) {
+                logger.info(`Omitiendo servidor ${server.regionName} > ${server.serverName}: datos ya actualizados después del último reset`, 'Prefetch');
+                prefetchStatus.skippedServers++;
+                prefetchStatus.serversProcessed++; // Incrementar contador aunque se omita
+                continue; // Saltar a la siguiente iteración
+            }
+            
             logger.info(`Procesando servidor: ${server.regionName} > ${server.serverName}`, 'Prefetch');
             
             const startTime = Date.now();
@@ -205,7 +274,7 @@ async function prefetchAllServers(options = {}) {
             }
             
             // Pequeña pausa para no sobrecargar el servidor objetivo
-            await new Promise(resolve => setTimeout(resolve, CONFIG.PREFETCH_DELAY));
+            await new Promise(resolve => setTimeout(resolve, 1000)); // 1 segundo de pausa
             
         } catch (error) {
             logger.error(`Error al procesar servidor ${server.regionName} > ${server.serverName}: ${error.message}`, 'Prefetch');
@@ -246,7 +315,7 @@ async function prefetchAllServers(options = {}) {
         rl.close();
     }
     
-    logger.success(`Prefetch ${prefetchStatus.paused ? 'pausado' : 'completado'}: ${prefetchStatus.serversProcessed}/${prefetchStatus.totalServers} servidores procesados`, 'Prefetch');
+    logger.success(`Prefetch ${prefetchStatus.paused ? 'pausado' : 'completado'}: ${prefetchStatus.serversProcessed - prefetchStatus.skippedServers} servidores actualizados, ${prefetchStatus.skippedServers} omitidos (ya actualizados después del reset)`, 'Prefetch');
     
     if (prefetchStatus.errors.length > 0) {
         logger.warn(`Se encontraron ${prefetchStatus.errors.length} errores durante el prefetch`, 'Prefetch');

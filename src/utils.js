@@ -44,14 +44,15 @@ async function saveScrapedHtml(html, customPrefix = 'scraped_ranking') {
 }
 
 /**
- * Elimina archivos HTML antiguos y archivos PNG del directorio de páginas scrapeadas
+ * Elimina archivos HTML antiguos y archivos PNG del directorio de páginas scrapeadas y del directorio raíz
  */
 function cleanupOldFiles() {
     try {
         // Limpieza de archivos HTML y PNG en el directorio de páginas scrapeadas
         const scrapedPagesDir = path.join(process.cwd(), CONFIG.SCRAPED_PAGES_DIR);
         let removedHtmlCount = 0;
-        let removedPngCount = 0;
+        let removedScrapedPngCount = 0;
+        let removedRootPngCount = 0;
         
         // Verificar si el directorio existe
         if (fs.existsSync(scrapedPagesDir)) {
@@ -80,16 +81,36 @@ function cleanupOldFiles() {
                     // Eliminar archivos PNG dentro del directorio scraped_pages
                     fs.unlinkSync(filePath);
                     logger.warn(`Archivo PNG eliminado de ${CONFIG.SCRAPED_PAGES_DIR}: ${file}`, 'Sistema');
-                    removedPngCount++;
+                    removedScrapedPngCount++;
                 }
             });
         } else {
             logger.warn(`El directorio ${CONFIG.SCRAPED_PAGES_DIR} no existe.`, 'Sistema');
         }
         
+        // Limpieza de archivos PNG en el directorio raíz
+        const rootDir = process.cwd();
+        
+        // Leer todos los archivos en el directorio raíz
+        const rootFiles = fs.readdirSync(rootDir);
+        logger.info(`Revisando archivos PNG en el directorio raíz...`, 'Sistema');
+        
+        rootFiles.forEach(file => {
+            // Verificar si es un archivo PNG
+            if (file.endsWith('.png')) {
+                const filePath = path.join(rootDir, file);
+                
+                // Eliminar archivo PNG del directorio raíz
+                fs.unlinkSync(filePath);
+                logger.warn(`Archivo PNG eliminado del directorio raíz: ${file}`, 'Sistema');
+                removedRootPngCount++;
+            }
+        });
+        
         // Mostrar resumen de la limpieza
-        if (removedHtmlCount > 0 || removedPngCount > 0) {
-            logger.success(`Limpieza completada: ${removedHtmlCount} archivos HTML y ${removedPngCount} archivos PNG eliminados`, 'Sistema');
+        const totalRemoved = removedHtmlCount + removedScrapedPngCount + removedRootPngCount;
+        if (totalRemoved > 0) {
+            logger.success(`Limpieza completada: ${removedHtmlCount} archivos HTML, ${removedScrapedPngCount} archivos PNG de ${CONFIG.SCRAPED_PAGES_DIR} y ${removedRootPngCount} archivos PNG del directorio raíz eliminados`, 'Sistema');
         } else {
             logger.info('Limpieza completada: No se eliminaron archivos', 'Sistema');
         }
