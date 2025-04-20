@@ -44,13 +44,14 @@ async function saveScrapedHtml(html, customPrefix = 'scraped_ranking') {
 }
 
 /**
- * Elimina archivos HTML antiguos (mayores al tiempo configurado) y archivos PNG
+ * Elimina archivos HTML antiguos y archivos PNG del directorio de páginas scrapeadas
  */
 function cleanupOldFiles() {
     try {
-        // Limpieza de archivos HTML en el directorio de páginas scrapeadas
+        // Limpieza de archivos HTML y PNG en el directorio de páginas scrapeadas
         const scrapedPagesDir = path.join(process.cwd(), CONFIG.SCRAPED_PAGES_DIR);
         let removedHtmlCount = 0;
+        let removedPngCount = 0;
         
         // Verificar si el directorio existe
         if (fs.existsSync(scrapedPagesDir)) {
@@ -59,12 +60,12 @@ function cleanupOldFiles() {
             
             // Leer todos los archivos en el directorio
             const files = fs.readdirSync(scrapedPagesDir);
-            logger.info(`Revisando ${files.length} archivos HTML para limpieza...`, 'Sistema');
+            logger.info(`Revisando ${files.length} archivos para limpieza en ${CONFIG.SCRAPED_PAGES_DIR}...`, 'Sistema');
             
             files.forEach(file => {
                 const filePath = path.join(scrapedPagesDir, file);
                 
-                // Verificar si es un archivo HTML
+                // Verificar si es un archivo HTML o PNG
                 if (file.endsWith('.html')) {
                     const stats = fs.statSync(filePath);
                     const fileAge = currentTime - stats.mtimeMs;
@@ -72,34 +73,19 @@ function cleanupOldFiles() {
                     // Si el archivo es más antiguo que el tiempo máximo permitido, eliminarlo
                     if (fileAge > maxAgeMs) {
                         fs.unlinkSync(filePath);
-                        logger.warn(`Archivo eliminado: ${file} (antigüedad: ${Math.round(fileAge/1000)} segundos)`, 'Sistema');
+                        logger.warn(`Archivo HTML eliminado: ${file} (antigüedad: ${Math.round(fileAge/1000)} segundos)`, 'Sistema');
                         removedHtmlCount++;
                     }
+                } else if (file.endsWith('.png')) {
+                    // Eliminar archivos PNG dentro del directorio scraped_pages
+                    fs.unlinkSync(filePath);
+                    logger.warn(`Archivo PNG eliminado de ${CONFIG.SCRAPED_PAGES_DIR}: ${file}`, 'Sistema');
+                    removedPngCount++;
                 }
             });
         } else {
             logger.warn(`El directorio ${CONFIG.SCRAPED_PAGES_DIR} no existe.`, 'Sistema');
         }
-        
-        // Limpieza de archivos PNG en el directorio raíz
-        const rootDir = process.cwd();
-        let removedPngCount = 0;
-        
-        // Leer todos los archivos en el directorio raíz
-        const rootFiles = fs.readdirSync(rootDir);
-        logger.info(`Buscando archivos PNG en el directorio raíz...`, 'Sistema');
-        
-        rootFiles.forEach(file => {
-            const filePath = path.join(rootDir, file);
-            
-            // Verificar si es un archivo PNG
-            if (file.endsWith('.png')) {
-                // Eliminar archivo PNG sin importar su antigüedad
-                fs.unlinkSync(filePath);
-                logger.warn(`Archivo PNG eliminado: ${file}`, 'Sistema');
-                removedPngCount++;
-            }
-        });
         
         // Mostrar resumen de la limpieza
         if (removedHtmlCount > 0 || removedPngCount > 0) {

@@ -60,6 +60,26 @@ function initDatabase() {
             )
         `).run();
 
+        // Nueva tabla para detalles de personajes
+        db.prepare(`
+            CREATE TABLE IF NOT EXISTS character_details (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ranking_id INTEGER,
+                level INTEGER,
+                prestige_level INTEGER DEFAULT 0,
+                equipment_score INTEGER DEFAULT 0,
+                spirit_score INTEGER DEFAULT 0,
+                energy_score INTEGER DEFAULT 0,
+                magical_stone_score INTEGER DEFAULT 0,
+                codex_score INTEGER DEFAULT 0,
+                trophy_score INTEGER DEFAULT 0,
+                ethics INTEGER DEFAULT 0,
+                achievements TEXT,
+                last_update DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(ranking_id) REFERENCES rankings(id)
+            )
+        `).run();
+
         // Tabla para el registro de operaciones de actualización
         db.prepare(`
             CREATE TABLE IF NOT EXISTS update_logs (
@@ -80,6 +100,9 @@ function initDatabase() {
         db.prepare(`CREATE INDEX IF NOT EXISTS idx_rankings_clan ON rankings(clan)`).run();
         db.prepare(`CREATE INDEX IF NOT EXISTS idx_rankings_class ON rankings(class)`).run();
         db.prepare(`CREATE INDEX IF NOT EXISTS idx_rankings_collection_time ON rankings(collection_time)`).run();
+        
+        // Índices para la tabla de detalles de personajes
+        db.prepare(`CREATE INDEX IF NOT EXISTS idx_character_details_ranking_id ON character_details(ranking_id)`).run();
 
         logger.success('Tablas de la base de datos inicializadas correctamente', 'Database');
     } catch (error) {
@@ -216,6 +239,152 @@ function saveServerRankings(rankings, regionName, serverName) {
 }
 
 /**
+ * Guarda los detalles adicionales de un personaje
+ * @param {number} rankingId - ID del ranking al que pertenece el personaje
+ * @param {Object} details - Detalles del personaje
+ */
+function saveCharacterDetails(rankingId, details) {
+    try {
+        // Verificar si ya existen detalles para este personaje
+        const existingDetails = db.prepare(`
+            SELECT id FROM character_details WHERE ranking_id = ?
+        `).get(rankingId);
+        
+        if (existingDetails) {
+            // Actualizar detalles existentes
+            db.prepare(`
+                UPDATE character_details
+                SET level = ?,
+                    prestige_level = ?,
+                    equipment_score = ?,
+                    spirit_score = ?,
+                    energy_score = ?,
+                    magical_stone_score = ?,
+                    codex_score = ?,
+                    trophy_score = ?,
+                    ethics = ?,
+                    achievements = ?,
+                    last_update = CURRENT_TIMESTAMP
+                WHERE ranking_id = ?
+            `).run(
+                details.level || 0,
+                details.prestigeLevel || 0,
+                details.equipmentScore || 0,
+                details.spiritScore || 0,
+                details.energyScore || 0,
+                details.magicalStoneScore || 0,
+                details.codexScore || 0,
+                details.trophyScore || 0,
+                details.ethics || 0,
+                details.achievements ? JSON.stringify(details.achievements) : null,
+                rankingId
+            );
+            logger.success(`Detalles del personaje actualizados para ranking ID: ${rankingId}`, 'Database');
+        } else {
+            // Insertar nuevos detalles
+            db.prepare(`
+                INSERT INTO character_details (
+                    ranking_id, level, prestige_level, equipment_score,
+                    spirit_score, energy_score, magical_stone_score, 
+                    codex_score, trophy_score, ethics, achievements
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+                rankingId,
+                details.level || 0,
+                details.prestigeLevel || 0,
+                details.equipmentScore || 0,
+                details.spiritScore || 0,
+                details.energyScore || 0,
+                details.magicalStoneScore || 0,
+                details.codexScore || 0,
+                details.trophyScore || 0,
+                details.ethics || 0,
+                details.achievements ? JSON.stringify(details.achievements) : null
+            );
+            logger.success(`Nuevos detalles de personaje guardados para ranking ID: ${rankingId}`, 'Database');
+        }
+    } catch (error) {
+        logger.error(`Error al guardar detalles del personaje: ${error.message}`, 'Database');
+    }
+}
+
+/**
+ * Obtiene los detalles completos de un personaje por su nombre y servidor
+ * @param {string} characterName - Nombre del personaje
+ * @param {string} regionName - Nombre de la región
+ * @param {string} serverName - Nombre del servidor
+ * @returns {Object|null} - Detalles completos del personaje o null si no se encuentra
+ */
+function getCharacterDetails(characterName, regionName, serverName) {
+    try {
+        const characterData = db.prepare(`
+            SELECT 
+                r.id as ranking_id,
+                r.rank,
+                r.character,
+                r.clan,
+                r.class,
+                r.power_score as powerScore,
+                r.collection_time as collectionTime,
+                cd.level,
+                cd.prestige_level as prestigeLevel,
+                cd.equipment_score as equipmentScore,
+                cd.spirit_score as spiritScore,
+                cd.energy_score as energyScore,
+                cd.magical_stone_score as magicalStoneScore,
+                cd.codex_score as codexScore,
+                cd.trophy_score as trophyScore,
+                cd.ethics,
+                cd.achievements,
+                cd.last_update as lastUpdate
+            FROM rankings r
+            JOIN servers s ON r.server_id = s.id
+            LEFT JOIN character_details cd ON r.id = cd.ranking_id
+            WHERE r.character = ? AND s.region_name = ? AND s.server_name = ?
+            ORDER BY r.collection_time DESC
+            LIMIT 1
+        `).get(characterName, regionName, serverName);
+        
+        if (characterData && characterData.achievements) {
+            try {
+                characterData.achievements = JSON.parse(characterData.achievements);
+            } catch (e) {
+                characterData.achievements = [];
+            }
+        }
+        
+        return characterData || null;
+    } catch (error) {
+        logger.error(`Error al obtener detalles del personaje ${characterName}: ${error.message}`, 'Database');
+        return null;
+    }
+}
+
+/**
+ * Obtiene el ID de un ranking por nombre de personaje y servidor
+ * @param {string} characterName - Nombre del personaje
+ * @param {string} regionName - Nombre de la región
+ * @param {string} serverName - Nombre del servidor
+ * @returns {number|null} - ID del ranking o null si no se encuentra
+ */
+function getRankingId(characterName, regionName, serverName) {
+    try {
+        const result = db.prepare(`
+            SELECT r.id
+            FROM rankings r
+            JOIN servers s ON r.server_id = s.id
+            WHERE r.character = ? AND s.region_name = ? AND s.server_name = ?
+        `).get(characterName, regionName, serverName);
+        
+        return result ? result.id : null;
+    } catch (error) {
+        logger.error(`Error al obtener ranking ID para ${characterName}: ${error.message}`, 'Database');
+        return null;
+    }
+}
+
+/**
  * Obtiene los servidores activos de la base de datos
  * @returns {Array} - Lista de servidores activos
  */
@@ -342,6 +511,9 @@ module.exports = {
     markServerAsInactive,
     markServerAsActive,
     saveServerRankings,
+    saveCharacterDetails,
+    getCharacterDetails,
+    getRankingId,
     getActiveServers,
     getServerRankings,
     logUpdateOperation,
