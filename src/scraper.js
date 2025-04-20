@@ -8,6 +8,7 @@ const puppeteer = require('puppeteer');
 const { CHARACTER_CLASSES, HEADERS, CONFIG, SERVER_REGIONS } = require('./config');
 const { extractImageUrlFromStyle, saveScrapedHtml } = require('./utils');
 const { getMainCache, setMainCache, getServerCache, setServerCache } = require('./cache');
+const { getServerRankings } = require('./database');
 const logger = require('./logger');
 
 /**
@@ -100,6 +101,85 @@ function buildServerUrl(regionName, serverName) {
 }
 
 /**
+ * Compara los datos existentes en la base de datos con los datos recién scrapeados
+ * para determinar si es necesario continuar con el scraping completo
+ * 
+ * @param {Array} scrapedData - Datos recién scrapeados (al menos de la primera página)
+ * @param {string} regionName - Nombre de la región (opcional, para servidor específico)
+ * @param {string} serverName - Nombre del servidor (opcional, para servidor específico)
+ * @returns {boolean} - True si es necesario continuar con el scraping, false si los datos son similares
+ */
+async function shouldContinueScraping(scrapedData, regionName = null, serverName = null) {
+    try {
+        // Si no hay datos scrapeados, debemos continuar el scraping
+        if (!scrapedData || scrapedData.length === 0) {
+            logger.scraper('No hay datos scrapeados para comparar, continuando con el scraping completo');
+            return true;
+        }
+
+        // Obtener datos existentes de la base de datos
+        const existingData = regionName && serverName 
+            ? getServerRankings(regionName, serverName)  // Para un servidor específico
+            : getMainCache();  // Para el ranking general
+        
+        // Si no hay datos en la base de datos, debemos continuar el scraping
+        if (!existingData || existingData.length === 0) {
+            logger.scraper('No hay datos existentes para comparar, continuando con el scraping completo');
+            return true;
+        }
+
+        // Verificar si es hora del reset diario de rankings
+        const now = new Date();
+        const resetHour = 4; // Asumiendo que el reset es a las 4:00 UTC
+        if (now.getUTCHours() === resetHour && now.getUTCMinutes() < 15) {
+            logger.scraper('Es hora del reset diario de rankings, forzando scraping completo');
+            return true;
+        }
+
+        // Comparar jugadores en el top (limitado a la cantidad de datos scrapeados)
+        const comparisonLimit = Math.min(scrapedData.length, existingData.length);
+        let matchCount = 0;
+
+        // Crear mapa de jugadores existentes por nombre para búsqueda rápida
+        const existingPlayers = new Map();
+        existingData.forEach(player => {
+            existingPlayers.set(player.character, player);
+        });
+
+        // Comparar jugadores por nombre, posición de ranking y puntuación de poder
+        for (let i = 0; i < comparisonLimit; i++) {
+            const scrapedPlayer = scrapedData[i];
+            const existingPlayer = existingPlayers.get(scrapedPlayer.character);
+            
+            if (existingPlayer) {
+                // Considerar una coincidencia si tienen el mismo nombre y posición similar (+/- 2)
+                const rankDiff = Math.abs(scrapedPlayer.rank - existingPlayer.rank);
+                if (rankDiff <= 2) {
+                    matchCount++;
+                }
+            }
+        }
+
+        // Calcular porcentaje de similitud
+        const similarityPercentage = (matchCount / comparisonLimit) * 100;
+        logger.scraper(`Similitud de datos: ${similarityPercentage.toFixed(2)}% (${matchCount} de ${comparisonLimit} coincidencias)`);
+
+        // Si la similitud es mayor o igual al 20%, no es necesario continuar con el scraping
+        if (similarityPercentage >= 20) {
+            logger.scraper(`Datos suficientemente similares (${similarityPercentage.toFixed(2)}%), omitiendo scraping completo`);
+            return false;
+        } else {
+            logger.scraper(`Datos insuficientemente similares (${similarityPercentage.toFixed(2)}%), continuando con scraping completo`);
+            return true;
+        }
+    } catch (error) {
+        logger.error(`Error al comparar datos: ${error.message}`, 'Scraper');
+        // En caso de error, continuamos con el scraping para asegurar datos actualizados
+        return true;
+    }
+}
+
+/**
  * Obtiene y parsea los datos del ranking de MIR4 para un servidor específico
  * @param {string} regionName - Nombre de la región (ej: ASIA, IMENA)
  * @param {string} serverName - Nombre del servidor (ej: ASIA011, IMENA011)
@@ -169,12 +249,38 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
             const htmlFileName = `${regionName}_${serverName}`;
             await saveScrapedHtml(currentPageHtml, htmlFileName);
             
+            // Verificar si es necesario continuar con el scraping
+            if (!forceRefresh) {
+                const shouldContinue = await shouldContinueScraping(allRankings, regionName, serverName);
+                if (!shouldContinue) {
+                    logger.scraper(`Usando datos existentes para ${regionName} > ${serverName}, omitiendo scraping adicional`);
+                    await browser.close();
+                    
+                    const existingData = getServerCache(cacheKey);
+                    if (existingData) {
+                        // Añadir información de región/servidor a cada jugador
+                        return existingData.map(player => ({
+                            ...player,
+                            regionName,
+                            serverName
+                        }));
+                    }
+                    
+                    // Si no hay datos en caché, usar los de la base de datos
+                    const dbData = getServerRankings(regionName, serverName);
+                    if (dbData && dbData.length > 0) {
+                        // Guardar en caché para futuras consultas
+                        setServerCache(cacheKey, dbData);
+                        return dbData;
+                    }
+                }
+            }
+            
             // Cargar más páginas haciendo clic en el botón "Ver más"
             let pagesLoaded = 1;
             
             while (pagesLoaded < CONFIG.MAX_PAGES_TO_SCRAPE) {
                 try {
-                    // Resto de la lógica igual que en fetchRankingData...
                     // Comprobar si existe el botón "Ver más"
                     logger.scraper(`Buscando botón "Ver más" con selector: ${CONFIG.LOAD_MORE_BUTTON_SELECTOR}`);
                     
@@ -351,6 +457,16 @@ async function fetchRankingData(forceRefresh = false) {
             
             // Guardar el HTML inicial
             await saveScrapedHtml(currentPageHtml);
+            
+            // Verificar si es necesario continuar con el scraping
+            if (!forceRefresh) {
+                const shouldContinue = await shouldContinueScraping(allRankings);
+                if (!shouldContinue) {
+                    logger.scraper('Usando datos existentes, omitiendo scraping adicional');
+                    await browser.close();
+                    return getMainCache();
+                }
+            }
             
             // Cargar más páginas haciendo clic en el botón "Ver más"
             let pagesLoaded = 1;
