@@ -7,6 +7,8 @@ const { fetchRankingData, fetchServerRankingData, buildServerUrl } = require('./
 const { getQueryCache, setQueryCache, clearCache, getCacheStats, getServerCache } = require('./cache');
 const { SERVER_REGIONS, CONFIG } = require('./config');
 const logger = require('./logger');
+// Importamos el nuevo módulo de base de datos KV
+const database = require('./kv-database');
 
 const router = express.Router();
 

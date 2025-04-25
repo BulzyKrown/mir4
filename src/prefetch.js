@@ -9,7 +9,7 @@ const { SERVER_REGIONS, CONFIG } = require('./config');
 const { fetchServerRankingData } = require('./scraper');
 const { setServerCache } = require('./cache');
 const logger = require('./logger');
-const { db, markServerAsInactive, saveServerRankings, updateServersDatabase, logUpdateOperation } = require('./database');
+const { markServerAsInactive, saveServerRankings, updateServersDatabase, logUpdateOperation, getFromKV } = require('./kv-database');
 
 // Ruta del archivo de estado del prefetch
 const PREFETCH_STATUS_FILE = path.join(process.cwd(), CONFIG.DATA_DIR, 'prefetch_status.json');
@@ -109,21 +109,17 @@ function savePrefetchStatus() {
  */
 async function isServerDataUpdatedAfterReset(regionName, serverName) {
     try {
-        // Obtener la última actualización del servidor desde la base de datos
-        const serverData = db.prepare(`
-            SELECT MAX(r.collection_time) as last_update
-            FROM rankings r
-            JOIN servers s ON r.server_id = s.id
-            WHERE s.region_name = ? AND s.server_name = ?
-        `).get(regionName, serverName);
+        // Obtener los datos del servidor usando KV
+        const serverKey = `server_${regionName}_${serverName}`;
+        const serverData = await getFromKV(serverKey);
         
-        if (!serverData || !serverData.last_update) {
+        if (!serverData || !serverData.length || !serverData[0].collectionTime) {
             // No hay datos previos, por lo que necesitamos actualizar
             return false;
         }
         
-        // Convertir la última actualización a objeto Date
-        const lastUpdate = new Date(serverData.last_update);
+        // Obtener la última actualización (tomando el primer jugador como referencia)
+        const lastUpdate = new Date(serverData[0].collectionTime);
         
         // Obtener la fecha y hora actual en UTC
         const now = new Date();
@@ -209,7 +205,7 @@ async function prefetchAllServers(options = {}) {
         startTime: prefetchStatus.startTime,
         affectedServers: prefetchStatus.totalServers
     };
-    logUpdateOperation(updateOperation);
+    await logUpdateOperation(updateOperation);
     
     // Procesar cada servidor secuencialmente para no saturar el sistema
     for (const server of servers) {
@@ -239,8 +235,8 @@ async function prefetchAllServers(options = {}) {
                 // Guardar en caché para el sistema actual
                 setServerCache(`${server.regionName}_${server.serverName}`, rankings);
                 
-                // Guardar en la base de datos para almacenamiento persistente
-                saveServerRankings(rankings, server.regionName, server.serverName);
+                // Guardar en la base de datos KV para almacenamiento persistente
+                await saveServerRankings(rankings, server.regionName, server.serverName);
                 
                 logger.success(`Servidor ${server.regionName} > ${server.serverName} procesado: ${rankings.length} jugadores en ${(endTime - startTime) / 1000}s`, 'Prefetch');
             } else {
@@ -248,7 +244,7 @@ async function prefetchAllServers(options = {}) {
                 logger.warn(`Servidor ${server.regionName} > ${server.serverName} no devolvió datos, posiblemente no existe`, 'Prefetch');
                 
                 // Marcar el servidor como inactivo en la base de datos
-                markServerAsInactive(server.regionName, server.serverName);
+                await markServerAsInactive(server.regionName, server.serverName);
                 
                 prefetchStatus.errors.push(`${server.regionName} > ${server.serverName}: Servidor posiblemente inexistente`);
                 
@@ -287,7 +283,7 @@ async function prefetchAllServers(options = {}) {
             };
             
             // Marcar el servidor como inactivo en caso de error
-            markServerAsInactive(server.regionName, server.serverName);
+            await markServerAsInactive(server.regionName, server.serverName);
             
             // Si estamos en modo interactivo, preguntar si continuar después de un error
             if (interactive) {
@@ -305,7 +301,7 @@ async function prefetchAllServers(options = {}) {
     // Finalizar la operación en la base de datos
     updateOperation.status = prefetchStatus.paused ? 'paused' : 'completed';
     updateOperation.endTime = prefetchStatus.endTime;
-    logUpdateOperation(updateOperation);
+    await logUpdateOperation(updateOperation);
     
     // Guardar estado final
     savePrefetchStatus();

@@ -8,7 +8,7 @@ const puppeteer = require('puppeteer');
 const { CHARACTER_CLASSES, HEADERS, CONFIG, SERVER_REGIONS } = require('./config');
 const { extractImageUrlFromStyle, saveScrapedHtml } = require('./utils');
 const { getMainCache, setMainCache, getServerCache, setServerCache } = require('./cache');
-const { getServerRankings } = require('./database');
+const { getServerRankings } = require('./kv-database'); // Cambiado de './database' a './kv-database'
 const logger = require('./logger');
 
 /**

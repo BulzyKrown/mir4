@@ -10,6 +10,7 @@ const { fetchRankingData } = require('./src/scraper');
 const { initPrefetch, prefetchAllServers } = require('./src/prefetch');
 const apiRoutes = require('./src/routes');
 const logger = require('./src/logger');
+const { initDatabase } = require('./src/kv-database'); // Cambiado a usar KV Database
 
 // Inicializar la aplicación Express
 const app = express();
@@ -23,10 +24,16 @@ const showBanner = () => {
     console.log("║             MIR4 RANKING API                    ║");
     console.log("║                                                 ║");
     console.log("║       API para consultar rankings de MIR4       ║");
+    console.log("║          [Cloudflare KV Edition]                ║");
     console.log("║                                                 ║");
     console.log("╚═════════════════════════════════════════════════╝");
     console.log("\n");
 };
+
+// Inicializar la base de datos KV
+initDatabase()
+    .then(() => logger.success('Base de datos KV inicializada correctamente', 'Sistema'))
+    .catch(err => logger.error(`Error al inicializar base de datos KV: ${err.message}`, 'Sistema'));
 
 // Middleware para analizar JSON en solicitudes
 app.use(express.json());

@@ -322,16 +322,12 @@ const CONFIG = {
     SERVER_CACHE_TTL: 12 * 60 * 60 * 1000, // 12 horas en milisegundos para el caché de servidores
     PREFETCH_CRON: '0 */12 * * *', // Cada 12 horas (a las 00:00 y 12:00)
     
-    // Configuración de MySQL usando variables de entorno
-    MYSQL: {
-        host: process.env.MYSQL_HOST || 'localhost',
-        port: parseInt(process.env.MYSQL_PORT || '3306'),
-        user: process.env.MYSQL_USER || 'root',
-        password: process.env.MYSQL_PASSWORD || '',
-        database: process.env.MYSQL_DATABASE || 'mir4rankings',
-        waitForConnections: true,
-        connectionLimit: parseInt(process.env.MYSQL_CONNECTION_LIMIT || '10'),
-        queueLimit: 0
+    // Configuración para Cloudflare KV usando variables de entorno
+    CLOUDFLARE: {
+        ACCOUNT_ID: process.env.CF_ACCOUNT_ID,
+        API_TOKEN: process.env.CF_API_TOKEN,
+        KV_NAMESPACE_ID: process.env.CF_KV_NAMESPACE_ID,
+        API_BASE_URL: 'https://api.cloudflare.com/client/v4'
     }
 };
 
