@@ -21,6 +21,11 @@ Thumbs.db
 .env.*
 !.env.example
 
+# Configuración de Cloudflare Workers
+wrangler.toml
+.wrangler/
+.cloudflare/
+
 # Logs
 logs/
 *.log

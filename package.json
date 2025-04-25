@@ -5,7 +5,10 @@
   "scripts": {
     "test": "jest",
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "worker:dev": "wrangler dev worker/index.js",
+    "worker:deploy": "wrangler deploy",
+    "sync:cloudflare": "node worker/sync-to-cloudflare.js"
   },
   "keywords": [],
   "author": "",
@@ -20,12 +23,14 @@
     "express": "^5.1.0",
     "mysql2": "^3.14.0",
     "node-cron": "^3.0.3",
+    "node-fetch": "^3.3.2",
     "puppeteer": "^24.6.1"
   },
   "devDependencies": {
     "@babel/core": "^7.x",
     "@babel/preset-env": "^7.x",
     "jest": "^29.x",
+    "miniflare": "^4.20250424.1",
     "supertest": "^6.x"
   },
   "jest": {

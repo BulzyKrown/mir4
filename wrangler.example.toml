@@ -1,0 +1,22 @@
+name = "mir4-ranking-api"
+main = "worker/index.js"
+compatibility_date = "2024-04-25"
+
+# Variables de entorno para el Worker
+[vars]
+ENVIRONMENT = "production"
+
+# Configuración para ejecuciones programadas (reemplazo de node-cron)
+[triggers]
+crons = ["0 */12 * * *"]  # Similar al PREFETCH_CRON, ejecutar cada 12 horas
+
+# Configuración para KV Storage
+[[kv_namespaces]]
+binding = "MIR4_RANKINGS"
+id = "TU_KV_NAMESPACE_ID_AQUÍ"  # Reemplaza esto con el ID de tu namespace KV
+
+# Instrucciones:
+# 1. Copia este archivo como "wrangler.toml"
+# 2. Crea un namespace KV con: wrangler kv namespace create MIR4_RANKINGS
+# 3. Reemplaza "TU_KV_NAMESPACE_ID_AQUÍ" con el ID que obtengas
+# 4. Despliega con: wrangler deploy
