@@ -2,6 +2,9 @@
  * Archivo de configuración para la API de rankings de MIR4
  */
 
+// Cargar variables de entorno
+require('dotenv').config();
+
 // Mapa de URLs de imágenes a clases de personajes
 const CHARACTER_CLASSES = {
     'https://mir4-live-hp.wemade.com/mir4-forum/img/desktop/temp/char_1.png': 'Guerrero',
@@ -306,7 +309,7 @@ const HEADERS = {
 
 // Configuraciones generales
 const CONFIG = {
-    PORT: 3000,
+    PORT: process.env.PORT || 3000,
     RANKING_URL: 'https://forum.mir4global.com/rank?ranktype=1',
     MAX_FILE_AGE_MS: 1 * 60 * 1000, // 1 minuto en milisegundos
     CLEANUP_CRON: '*/5 * * * *', // Cada 5 minutos
@@ -317,7 +320,19 @@ const CONFIG = {
     WAIT_BETWEEN_CLICKS_MS: 2000, // Tiempo de espera entre clics en el botón "Ver más"
     BROWSER_HEADLESS: true, // Ejecutar el navegador en modo headless
     SERVER_CACHE_TTL: 12 * 60 * 60 * 1000, // 12 horas en milisegundos para el caché de servidores
-    PREFETCH_CRON: '0 */12 * * *' // Cada 12 horas (a las 00:00 y 12:00)
+    PREFETCH_CRON: '0 */12 * * *', // Cada 12 horas (a las 00:00 y 12:00)
+    
+    // Configuración de MySQL usando variables de entorno
+    MYSQL: {
+        host: process.env.MYSQL_HOST || 'localhost',
+        port: parseInt(process.env.MYSQL_PORT || '3306'),
+        user: process.env.MYSQL_USER || 'root',
+        password: process.env.MYSQL_PASSWORD || '',
+        database: process.env.MYSQL_DATABASE || 'mir4rankings',
+        waitForConnections: true,
+        connectionLimit: parseInt(process.env.MYSQL_CONNECTION_LIMIT || '10'),
+        queueLimit: 0
+    }
 };
 
 module.exports = {

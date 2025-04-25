@@ -14,10 +14,7 @@ scraped_pages/
 *.swo
 .DS_Store
 Thumbs.db
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
+.env.*
 
 # Archivos de entorno
 .env

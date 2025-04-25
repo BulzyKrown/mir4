@@ -15,6 +15,7 @@ Esta API proporciona acceso a los datos del ranking de Power Score de MIR4, incl
 
 - Node.js (v14 o superior)
 - npm o yarn
+- MySQL (v8.0 o superior)
 
 ## Instalación
 
@@ -29,12 +30,55 @@ npm install
 
 ## Configuración
 
-La configuración del proyecto se encuentra en `src/config.js`. Los principales parámetros que puedes modificar son:
+La aplicación utiliza variables de entorno para la configuración principal. Se proporciona un archivo `example.env` que puede copiar y renombrar a `.env` para configurar su entorno:
 
-- `PORT`: Puerto en el que se ejecutará la API (por defecto: 3000)
+```bash
+# Copiar el archivo example.env a .env
+cp example.env .env
+
+# Editar el archivo .env con tus configuraciones
+nano .env  # o usa el editor que prefieras
+```
+
+### Variables de entorno
+
+El archivo `.env` debe contener las siguientes variables:
+
+```
+# Configuración del servidor
+PORT=3000
+
+# Configuración de MySQL
+MYSQL_HOST=localhost
+MYSQL_PORT=3306
+MYSQL_USER=tu_usuario
+MYSQL_PASSWORD=tu_contraseña
+MYSQL_DATABASE=mir4rankings
+MYSQL_CONNECTION_LIMIT=10
+```
+
+### Configuración adicional
+
+La configuración adicional del proyecto se encuentra en `src/config.js`. Los principales parámetros que puedes modificar son:
+
 - `MAX_FILE_AGE_MS`: Tiempo de vida de las páginas scrapeadas (1 minuto en milisegundos)
 - `CLEANUP_CRON`: Expresión cron para la limpieza de archivos (cada 5 minutos)
 - `SERVER_REGIONS`: Mapa de regiones y servidores con sus respectivos IDs
+
+### Configuración de la base de datos MySQL
+
+La aplicación requiere una base de datos MySQL. Antes de ejecutar la aplicación, asegúrate de:
+
+1. Tener MySQL instalado y funcionando
+2. Crear la base de datos para la aplicación:
+
+```sql
+CREATE DATABASE mir4rankings;
+```
+
+3. Configurar correctamente las credenciales en el archivo `.env`
+
+La aplicación creará automáticamente las tablas necesarias en la primera ejecución.
 
 ## Uso
 

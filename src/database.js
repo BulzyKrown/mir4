@@ -1,110 +1,121 @@
 /**
- * Módulo para manejar la base de datos SQLite
+ * Módulo para manejar la base de datos MySQL
  * Almacenamiento persistente para los rankings de MIR4
  */
 
 const path = require('path');
 const fs = require('fs');
-const Database = require('better-sqlite3');
+const mysql = require('mysql2/promise');
 const { CONFIG } = require('./config');
 const logger = require('./logger');
 
-// Ruta de la base de datos
-const DB_PATH = path.join(process.cwd(), CONFIG.DATA_DIR, 'mir4rankings.db');
-
-// Asegurar que existe el directorio para la base de datos
-const dataDir = path.join(process.cwd(), CONFIG.DATA_DIR);
-if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
-}
+// Pool de conexiones a la base de datos MySQL
+let pool;
 
 // Inicializar la conexión a la base de datos
-let db;
-try {
-    db = new Database(DB_PATH);
-    logger.info(`Base de datos SQLite conectada en: ${DB_PATH}`, 'Database');
-} catch (error) {
-    logger.error(`Error al conectar con la base de datos: ${error.message}`, 'Database');
-    throw error;
+async function initializeConnectionPool() {
+    try {
+        pool = mysql.createPool(CONFIG.MYSQL);
+        
+        // Verificar que la conexión funciona
+        const connection = await pool.getConnection();
+        await connection.ping();
+        connection.release();
+        
+        logger.info(`Base de datos MySQL conectada en: ${CONFIG.MYSQL.host}:${CONFIG.MYSQL.port}/${CONFIG.MYSQL.database}`, 'Database');
+        return true;
+    } catch (error) {
+        logger.error(`Error al conectar con la base de datos MySQL: ${error.message}`, 'Database');
+        throw error;
+    }
 }
 
+// Variable para indicar si la base de datos está lista
+let dbInitialized = false;
+
 // Crear tablas si no existen
-function initDatabase() {
+async function initDatabase() {
     try {
+        await initializeConnectionPool();
+        
         // Tabla para servidores
-        db.prepare(`
+        await pool.query(`
             CREATE TABLE IF NOT EXISTS servers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                region_name TEXT NOT NULL,
-                server_name TEXT NOT NULL,
-                region_id TEXT NOT NULL,
-                server_id TEXT NOT NULL,
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                region_name VARCHAR(50) NOT NULL,
+                server_name VARCHAR(50) NOT NULL,
+                region_id VARCHAR(50) NOT NULL,
+                server_id VARCHAR(50) NOT NULL,
                 is_active BOOLEAN DEFAULT 1,
                 last_update DATETIME,
                 UNIQUE(region_name, server_name)
             )
-        `).run();
+        `);
 
         // Tabla para rankings
-        db.prepare(`
+        await pool.query(`
             CREATE TABLE IF NOT EXISTS rankings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER,
-                rank INTEGER,
-                character TEXT,
-                clan TEXT,
-                class TEXT,
-                power_score INTEGER,
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                server_id INT,
+                rank INT,
+                character_name VARCHAR(100),
+                clan VARCHAR(100),
+                class VARCHAR(50),
+                power_score INT,
                 collection_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(server_id) REFERENCES servers(id)
             )
-        `).run();
+        `);
 
         // Nueva tabla para detalles de personajes
-        db.prepare(`
+        await pool.query(`
             CREATE TABLE IF NOT EXISTS character_details (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ranking_id INTEGER,
-                level INTEGER,
-                prestige_level INTEGER DEFAULT 0,
-                equipment_score INTEGER DEFAULT 0,
-                spirit_score INTEGER DEFAULT 0,
-                energy_score INTEGER DEFAULT 0,
-                magical_stone_score INTEGER DEFAULT 0,
-                codex_score INTEGER DEFAULT 0,
-                trophy_score INTEGER DEFAULT 0,
-                ethics INTEGER DEFAULT 0,
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                ranking_id INT,
+                level INT,
+                prestige_level INT DEFAULT 0,
+                equipment_score INT DEFAULT 0,
+                spirit_score INT DEFAULT 0,
+                energy_score INT DEFAULT 0,
+                magical_stone_score INT DEFAULT 0,
+                codex_score INT DEFAULT 0,
+                trophy_score INT DEFAULT 0,
+                ethics INT DEFAULT 0,
                 achievements TEXT,
                 last_update DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(ranking_id) REFERENCES rankings(id)
             )
-        `).run();
+        `);
 
         // Tabla para el registro de operaciones de actualización
-        db.prepare(`
+        await pool.query(`
             CREATE TABLE IF NOT EXISTS update_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                update_type TEXT NOT NULL,
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                update_type VARCHAR(50) NOT NULL,
                 description TEXT,
-                status TEXT NOT NULL,
+                status VARCHAR(20) NOT NULL,
                 start_time DATETIME NOT NULL,
                 end_time DATETIME,
-                affected_servers INTEGER DEFAULT 0,
+                affected_servers INT DEFAULT 0,
                 error_message TEXT
             )
-        `).run();
+        `);
 
         // Índices para mejorar rendimiento
-        db.prepare(`CREATE INDEX IF NOT EXISTS idx_rankings_server_id ON rankings(server_id)`).run();
-        db.prepare(`CREATE INDEX IF NOT EXISTS idx_rankings_character ON rankings(character)`).run();
-        db.prepare(`CREATE INDEX IF NOT EXISTS idx_rankings_clan ON rankings(clan)`).run();
-        db.prepare(`CREATE INDEX IF NOT EXISTS idx_rankings_class ON rankings(class)`).run();
-        db.prepare(`CREATE INDEX IF NOT EXISTS idx_rankings_collection_time ON rankings(collection_time)`).run();
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_rankings_server_id ON rankings(server_id)`);
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_rankings_character_name ON rankings(character_name)`);
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_rankings_clan ON rankings(clan)`);
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_rankings_class ON rankings(class)`);
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_rankings_collection_time ON rankings(collection_time)`);
         
         // Índices para la tabla de detalles de personajes
-        db.prepare(`CREATE INDEX IF NOT EXISTS idx_character_details_ranking_id ON character_details(ranking_id)`).run();
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_character_details_ranking_id ON character_details(ranking_id)`);
 
+        // Marcar la base de datos como inicializada
+        dbInitialized = true;
+        
         logger.success('Tablas de la base de datos inicializadas correctamente', 'Database');
+        return true;
     } catch (error) {
         logger.error(`Error al inicializar tablas de la base de datos: ${error.message}`, 'Database');
         throw error;
@@ -112,29 +123,55 @@ function initDatabase() {
 }
 
 // Inicializar la base de datos
-initDatabase();
+initDatabase().catch(err => {
+    logger.error(`Error fatal al inicializar la base de datos: ${err.message}`, 'Database');
+});
+
+// Helper para asegurar que la conexión a la BD está disponible
+async function ensureDbConnection() {
+    if (!dbInitialized) {
+        logger.warn("La conexión a la base de datos no está inicializada aún. Esperando...", 'Database');
+        // Intentar esperar hasta que la BD esté inicializada
+        for (let i = 0; i < 10; i++) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            if (dbInitialized) break;
+        }
+        
+        if (!dbInitialized) {
+            throw new Error("No se pudo establecer la conexión a la base de datos después de varios intentos.");
+        }
+    }
+    return pool;
+}
 
 /**
  * Actualiza la tabla de servidores con la información más reciente
  * @param {Object} serverRegions - Objeto con la configuración de regiones y servidores
  */
-function updateServersDatabase(serverRegions) {
-    const insertServer = db.prepare(`
-        INSERT OR IGNORE INTO servers (region_name, server_name, region_id, server_id) 
-        VALUES (?, ?, ?, ?)
-    `);
-    
-    const transaction = db.transaction((regions) => {
-        for (const [regionName, regionData] of Object.entries(regions)) {
-            for (const [serverName, serverData] of Object.entries(regionData.servers)) {
-                insertServer.run(regionName, serverName, regionData.id, serverData.id);
-            }
-        }
-    });
-    
+async function updateServersDatabase(serverRegions) {
     try {
-        transaction(serverRegions);
-        logger.success('Base de datos de servidores actualizada', 'Database');
+        await ensureDbConnection();
+        const connection = await pool.getConnection();
+        await connection.beginTransaction();
+        
+        try {
+            for (const [regionName, regionData] of Object.entries(serverRegions)) {
+                for (const [serverName, serverData] of Object.entries(regionData.servers)) {
+                    await connection.query(`
+                        INSERT IGNORE INTO servers (region_name, server_name, region_id, server_id) 
+                        VALUES (?, ?, ?, ?)
+                    `, [regionName, serverName, regionData.id, serverData.id]);
+                }
+            }
+            
+            await connection.commit();
+            logger.success('Base de datos de servidores actualizada', 'Database');
+        } catch (error) {
+            await connection.rollback();
+            throw error;
+        } finally {
+            connection.release();
+        }
     } catch (error) {
         logger.error(`Error al actualizar base de datos de servidores: ${error.message}`, 'Database');
     }
@@ -145,15 +182,16 @@ function updateServersDatabase(serverRegions) {
  * @param {string} regionName - Nombre de la región
  * @param {string} serverName - Nombre del servidor
  */
-function markServerAsInactive(regionName, serverName) {
+async function markServerAsInactive(regionName, serverName) {
     try {
-        const result = db.prepare(`
+        await ensureDbConnection();
+        const [result] = await pool.query(`
             UPDATE servers 
-            SET is_active = 0, last_update = CURRENT_TIMESTAMP 
+            SET is_active = 0, last_update = NOW() 
             WHERE region_name = ? AND server_name = ?
-        `).run(regionName, serverName);
+        `, [regionName, serverName]);
         
-        if (result.changes > 0) {
+        if (result.affectedRows > 0) {
             logger.info(`Servidor ${regionName} > ${serverName} marcado como inactivo`, 'Database');
         }
     } catch (error) {
@@ -166,15 +204,16 @@ function markServerAsInactive(regionName, serverName) {
  * @param {string} regionName - Nombre de la región
  * @param {string} serverName - Nombre del servidor
  */
-function markServerAsActive(regionName, serverName) {
+async function markServerAsActive(regionName, serverName) {
     try {
-        const result = db.prepare(`
+        await ensureDbConnection();
+        const [result] = await pool.query(`
             UPDATE servers 
-            SET is_active = 1, last_update = CURRENT_TIMESTAMP 
+            SET is_active = 1, last_update = NOW() 
             WHERE region_name = ? AND server_name = ?
-        `).run(regionName, serverName);
+        `, [regionName, serverName]);
         
-        if (result.changes > 0) {
+        if (result.affectedRows > 0) {
             logger.info(`Servidor ${regionName} > ${serverName} marcado como activo`, 'Database');
         }
     } catch (error) {
@@ -188,51 +227,73 @@ function markServerAsActive(regionName, serverName) {
  * @param {string} regionName - Nombre de la región
  * @param {string} serverName - Nombre del servidor
  */
-function saveServerRankings(rankings, regionName, serverName) {
+async function saveServerRankings(rankings, regionName, serverName) {
     if (!rankings || rankings.length === 0) {
         logger.warn(`No hay rankings para guardar de ${regionName} > ${serverName}`, 'Database');
         return;
     }
     
     try {
+        await ensureDbConnection();
         // Obtener ID del servidor
-        const serverId = db.prepare(`
+        const [serverRows] = await pool.query(`
             SELECT id FROM servers WHERE region_name = ? AND server_name = ?
-        `).get(regionName, serverName);
+        `, [regionName, serverName]);
         
-        if (!serverId) {
+        if (serverRows.length === 0) {
             logger.warn(`No se encontró el servidor ${regionName} > ${serverName} en la base de datos`, 'Database');
             return;
         }
         
+        const serverId = serverRows[0].id;
+        
         // Marcar el servidor como activo ya que tenemos datos
-        markServerAsActive(regionName, serverName);
+        await markServerAsActive(regionName, serverName);
         
-        // Eliminar rankings antiguos de este servidor
-        db.prepare(`DELETE FROM rankings WHERE server_id = ?`).run(serverId.id);
+        // Usar una estrategia sin deadlocks: 
+        // 1. Insertar con un timestamp actual
+        // 2. Eliminar registros antiguos después
         
-        // Insertar nuevos rankings
-        const insertRanking = db.prepare(`
-            INSERT INTO rankings (server_id, rank, character, clan, class, power_score)
-            VALUES (?, ?, ?, ?, ?, ?)
-        `);
+        const now = new Date();
+        const timestamp = now.toISOString().slice(0, 19).replace('T', ' ');
         
-        const transaction = db.transaction((serverRankings) => {
-            for (const player of serverRankings) {
-                insertRanking.run(
-                    serverId.id,
+        // Insertar nuevos rankings con el timestamp actual
+        const connection = await pool.getConnection();
+        
+        try {
+            // No usamos transacción para el bloque de inserciones para evitar bloqueos largos
+            for (const player of rankings) {
+                await connection.query(`
+                    INSERT INTO rankings (server_id, rank, character_name, clan, class, power_score, collection_time)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                `, [
+                    serverId,
                     player.rank,
                     player.character,
                     player.clan,
                     player.class,
-                    player.powerScore
-                );
+                    player.powerScore,
+                    timestamp
+                ]);
             }
-        });
-        
-        transaction(rankings);
-        
-        logger.success(`${rankings.length} rankings guardados en la base de datos para ${regionName} > ${serverName}`, 'Database');
+            
+            // Después de insertar todos, eliminamos los registros antiguos
+            // Solo conservamos los más recientes
+            await connection.query(`
+                DELETE FROM r1
+                USING rankings r1, rankings r2
+                WHERE r1.server_id = ? 
+                AND r1.server_id = r2.server_id
+                AND r1.character_name = r2.character_name
+                AND r1.collection_time < r2.collection_time
+            `, [serverId]);
+            
+            logger.success(`${rankings.length} rankings guardados en la base de datos para ${regionName} > ${serverName}`, 'Database');
+        } catch (error) {
+            throw error;
+        } finally {
+            connection.release();
+        }
     } catch (error) {
         logger.error(`Error al guardar rankings en la base de datos: ${error.message}`, 'Database');
     }
@@ -243,16 +304,17 @@ function saveServerRankings(rankings, regionName, serverName) {
  * @param {number} rankingId - ID del ranking al que pertenece el personaje
  * @param {Object} details - Detalles del personaje
  */
-function saveCharacterDetails(rankingId, details) {
+async function saveCharacterDetails(rankingId, details) {
     try {
+        await ensureDbConnection();
         // Verificar si ya existen detalles para este personaje
-        const existingDetails = db.prepare(`
+        const [existingRows] = await pool.query(`
             SELECT id FROM character_details WHERE ranking_id = ?
-        `).get(rankingId);
+        `, [rankingId]);
         
-        if (existingDetails) {
+        if (existingRows.length > 0) {
             // Actualizar detalles existentes
-            db.prepare(`
+            await pool.query(`
                 UPDATE character_details
                 SET level = ?,
                     prestige_level = ?,
@@ -264,9 +326,9 @@ function saveCharacterDetails(rankingId, details) {
                     trophy_score = ?,
                     ethics = ?,
                     achievements = ?,
-                    last_update = CURRENT_TIMESTAMP
+                    last_update = NOW()
                 WHERE ranking_id = ?
-            `).run(
+            `, [
                 details.level || 0,
                 details.prestigeLevel || 0,
                 details.equipmentScore || 0,
@@ -278,18 +340,18 @@ function saveCharacterDetails(rankingId, details) {
                 details.ethics || 0,
                 details.achievements ? JSON.stringify(details.achievements) : null,
                 rankingId
-            );
+            ]);
             logger.success(`Detalles del personaje actualizados para ranking ID: ${rankingId}`, 'Database');
         } else {
             // Insertar nuevos detalles
-            db.prepare(`
+            await pool.query(`
                 INSERT INTO character_details (
                     ranking_id, level, prestige_level, equipment_score,
                     spirit_score, energy_score, magical_stone_score, 
                     codex_score, trophy_score, ethics, achievements
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `).run(
+            `, [
                 rankingId,
                 details.level || 0,
                 details.prestigeLevel || 0,
@@ -301,7 +363,7 @@ function saveCharacterDetails(rankingId, details) {
                 details.trophyScore || 0,
                 details.ethics || 0,
                 details.achievements ? JSON.stringify(details.achievements) : null
-            );
+            ]);
             logger.success(`Nuevos detalles de personaje guardados para ranking ID: ${rankingId}`, 'Database');
         }
     } catch (error) {
@@ -316,13 +378,14 @@ function saveCharacterDetails(rankingId, details) {
  * @param {string} serverName - Nombre del servidor
  * @returns {Object|null} - Detalles completos del personaje o null si no se encuentra
  */
-function getCharacterDetails(characterName, regionName, serverName) {
+async function getCharacterDetails(characterName, regionName, serverName) {
     try {
-        const characterData = db.prepare(`
+        await ensureDbConnection();
+        const [rows] = await pool.query(`
             SELECT 
                 r.id as ranking_id,
                 r.rank,
-                r.character,
+                r.character_name as character,
                 r.clan,
                 r.class,
                 r.power_score as powerScore,
@@ -341,20 +404,26 @@ function getCharacterDetails(characterName, regionName, serverName) {
             FROM rankings r
             JOIN servers s ON r.server_id = s.id
             LEFT JOIN character_details cd ON r.id = cd.ranking_id
-            WHERE r.character = ? AND s.region_name = ? AND s.server_name = ?
+            WHERE r.character_name = ? AND s.region_name = ? AND s.server_name = ?
             ORDER BY r.collection_time DESC
             LIMIT 1
-        `).get(characterName, regionName, serverName);
+        `, [characterName, regionName, serverName]);
         
-        if (characterData && characterData.achievements) {
-            try {
-                characterData.achievements = JSON.parse(characterData.achievements);
-            } catch (e) {
-                characterData.achievements = [];
+        if (rows.length > 0) {
+            const characterData = rows[0];
+            
+            if (characterData.achievements) {
+                try {
+                    characterData.achievements = JSON.parse(characterData.achievements);
+                } catch (e) {
+                    characterData.achievements = [];
+                }
             }
+            
+            return characterData;
         }
         
-        return characterData || null;
+        return null;
     } catch (error) {
         logger.error(`Error al obtener detalles del personaje ${characterName}: ${error.message}`, 'Database');
         return null;
@@ -368,16 +437,17 @@ function getCharacterDetails(characterName, regionName, serverName) {
  * @param {string} serverName - Nombre del servidor
  * @returns {number|null} - ID del ranking o null si no se encuentra
  */
-function getRankingId(characterName, regionName, serverName) {
+async function getRankingId(characterName, regionName, serverName) {
     try {
-        const result = db.prepare(`
+        await ensureDbConnection();
+        const [rows] = await pool.query(`
             SELECT r.id
             FROM rankings r
             JOIN servers s ON r.server_id = s.id
-            WHERE r.character = ? AND s.region_name = ? AND s.server_name = ?
-        `).get(characterName, regionName, serverName);
+            WHERE r.character_name = ? AND s.region_name = ? AND s.server_name = ?
+        `, [characterName, regionName, serverName]);
         
-        return result ? result.id : null;
+        return rows.length > 0 ? rows[0].id : null;
     } catch (error) {
         logger.error(`Error al obtener ranking ID para ${characterName}: ${error.message}`, 'Database');
         return null;
@@ -388,13 +458,16 @@ function getRankingId(characterName, regionName, serverName) {
  * Obtiene los servidores activos de la base de datos
  * @returns {Array} - Lista de servidores activos
  */
-function getActiveServers() {
+async function getActiveServers() {
     try {
-        return db.prepare(`
+        await ensureDbConnection();
+        const [rows] = await pool.query(`
             SELECT region_name, server_name, region_id, server_id
             FROM servers 
             WHERE is_active = 1
-        `).all();
+        `);
+        
+        return rows;
     } catch (error) {
         logger.error(`Error al obtener servidores activos: ${error.message}`, 'Database');
         return [];
@@ -407,15 +480,18 @@ function getActiveServers() {
  * @param {string} serverName - Nombre del servidor
  * @returns {Array} - Rankings del servidor
  */
-function getServerRankings(regionName, serverName) {
+async function getServerRankings(regionName, serverName) {
     try {
-        return db.prepare(`
-            SELECT r.rank, r.character, r.clan, r.class, r.power_score as powerScore
+        await ensureDbConnection();
+        const [rows] = await pool.query(`
+            SELECT r.rank, r.character_name as character, r.clan, r.class, r.power_score as powerScore
             FROM rankings r
             JOIN servers s ON r.server_id = s.id
             WHERE s.region_name = ? AND s.server_name = ?
             ORDER BY r.rank
-        `).all(regionName, serverName);
+        `, [regionName, serverName]);
+        
+        return rows;
     } catch (error) {
         logger.error(`Error al obtener rankings del servidor ${regionName} > ${serverName}: ${error.message}`, 'Database');
         return [];
@@ -426,39 +502,40 @@ function getServerRankings(regionName, serverName) {
  * Registra una operación de actualización en la base de datos
  * @param {Object} operation - Datos de la operación
  */
-function logUpdateOperation(operation) {
+async function logUpdateOperation(operation) {
     try {
+        await ensureDbConnection();
         if (operation.status === 'running') {
             // Nueva operación
-            const result = db.prepare(`
+            const [result] = await pool.query(`
                 INSERT INTO update_logs 
                 (update_type, description, status, start_time, affected_servers)
                 VALUES (?, ?, ?, ?, ?)
-            `).run(
+            `, [
                 operation.updateType,
                 operation.description,
                 operation.status,
-                operation.startTime.toISOString(),
+                operation.startTime,
                 operation.affectedServers || 0
-            );
+            ]);
             
-            operation.id = result.lastInsertRowid;
+            operation.id = result.insertId;
         } else if (operation.status === 'completed' || operation.status === 'failed') {
             // Actualización de operación existente
             if (!operation.id) {
                 throw new Error('Se requiere un ID de operación para actualizarla');
             }
             
-            db.prepare(`
+            await pool.query(`
                 UPDATE update_logs
                 SET status = ?, end_time = ?, error_message = ?
                 WHERE id = ?
-            `).run(
+            `, [
                 operation.status,
-                operation.endTime ? operation.endTime.toISOString() : null,
+                operation.endTime || null,
                 operation.errorMessage || null,
                 operation.id
-            );
+            ]);
         }
     } catch (error) {
         logger.error(`Error al registrar operación de actualización: ${error.message}`, 'Database');
@@ -470,14 +547,15 @@ function logUpdateOperation(operation) {
  * Solo incluye servidores activos
  * @returns {Object} - Objeto con regiones y sus servidores activos
  */
-function getActiveServersList() {
+async function getActiveServersList() {
     try {
-        const servers = db.prepare(`
+        await ensureDbConnection();
+        const [servers] = await pool.query(`
             SELECT region_name, region_id, server_name, server_id
             FROM servers
             WHERE is_active = 1
             ORDER BY region_name, server_name
-        `).all();
+        `);
         
         // Organizar los resultados por región
         const serverList = {};
@@ -506,7 +584,8 @@ function getActiveServersList() {
 }
 
 module.exports = {
-    db,
+    pool,
+    initDatabase,
     updateServersDatabase,
     markServerAsInactive,
     markServerAsActive,

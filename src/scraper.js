@@ -250,7 +250,7 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
         const serverUrl = buildServerUrl(regionName, serverName);
         logger.scraper(`URL del servidor: ${serverUrl}`);
         
-        // Iniciar el navegador
+        // Iniciar el navegador usando configuración predeterminada de Puppeteer
         const browser = await puppeteer.launch({
             headless: CONFIG.BROWSER_HEADLESS,
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-web-security']
@@ -460,7 +460,7 @@ async function fetchRankingData(forceRefresh = false) {
         
         logger.scraper('Iniciando scraping completo del ranking desde la fuente...');
         
-        // Iniciar el navegador
+        // Iniciar el navegador usando Puppeteer
         const browser = await puppeteer.launch({
             headless: CONFIG.BROWSER_HEADLESS,
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-web-security']
