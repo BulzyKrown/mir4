@@ -10,6 +10,208 @@ const logger = require('./logger');
 
 const router = express.Router();
 
+// Endpoint para la ruta raíz con información básica
+router.get('/', (req, res) => {
+    try {
+        logger.route('Acceso a la página principal de la API');
+        res.json({
+            name: 'MIR4 Rankings API',
+            version: '1.0.0',
+            description: 'API para consultar rankings de jugadores en MIR4',
+            endpoints: {
+                '/': 'Información básica sobre la API',
+                '/docs': 'Documentación completa de la API',
+                '/rankings': 'Obtener todos los rankings',
+                '/rankings/range/:start/:end': 'Obtener un rango específico de rankings',
+                '/rankings/server/:server': 'Buscar por servidor',
+                '/rankings/clan/:clan': 'Buscar por clan',
+                '/rankings/class/:className': 'Filtrar por clase',
+                '/servers': 'Listar todas las regiones y servidores disponibles',
+                '/rankings/search/:characterName': 'Buscar un personaje en todos los servidores'
+            },
+            documentation: '/docs',
+            status: 'active'
+        });
+        logger.success('Información básica de la API enviada', 'API');
+    } catch (error) {
+        logger.error(`Error al servir la página principal: ${error.message}`, 'API');
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
+// Endpoint para documentación detallada de la API
+router.get('/docs', (req, res) => {
+    try {
+        logger.route('Acceso a la documentación de la API');
+        res.json({
+            title: 'Documentación de MIR4 Rankings API',
+            version: '1.0.0',
+            description: 'API para consultar rankings de jugadores en MIR4, permitiendo búsquedas por servidor, clan, clase y personaje.',
+            baseUrl: `${req.protocol}://${req.get('host')}`,
+            endpoints: [
+                {
+                    path: '/',
+                    method: 'GET',
+                    description: 'Información básica sobre la API y sus endpoints',
+                    parameters: [],
+                    response: 'Objeto JSON con información general sobre la API y sus endpoints disponibles'
+                },
+                {
+                    path: '/docs',
+                    method: 'GET',
+                    description: 'Documentación completa de la API',
+                    parameters: [],
+                    response: 'Objeto JSON con documentación detallada de todos los endpoints de la API'
+                },
+                {
+                    path: '/rankings',
+                    method: 'GET',
+                    description: 'Obtener el ranking completo de jugadores',
+                    parameters: [],
+                    response: 'Array de objetos con información de cada jugador'
+                },
+                {
+                    path: '/rankings/refresh',
+                    method: 'POST',
+                    description: 'Forzar actualización del caché de rankings',
+                    parameters: [],
+                    response: 'Objeto JSON con confirmación de actualización y conteo de registros'
+                },
+                {
+                    path: '/rankings/range/:start/:end',
+                    method: 'GET',
+                    description: 'Obtener un rango específico de rankings',
+                    parameters: [
+                        { name: 'start', type: 'number', description: 'Posición inicial del rango' },
+                        { name: 'end', type: 'number', description: 'Posición final del rango' }
+                    ],
+                    response: 'Array de objetos con los jugadores en el rango especificado'
+                },
+                {
+                    path: '/rankings/server/:server',
+                    method: 'GET',
+                    description: 'Buscar jugadores por servidor',
+                    parameters: [
+                        { name: 'server', type: 'string', description: 'Nombre del servidor a buscar' }
+                    ],
+                    response: 'Array de objetos con jugadores del servidor especificado'
+                },
+                {
+                    path: '/rankings/clan/:clan',
+                    method: 'GET',
+                    description: 'Buscar jugadores por clan',
+                    parameters: [
+                        { name: 'clan', type: 'string', description: 'Nombre del clan a buscar' }
+                    ],
+                    response: 'Array de objetos con jugadores del clan especificado'
+                },
+                {
+                    path: '/rankings/class/:className',
+                    method: 'GET',
+                    description: 'Filtrar jugadores por clase',
+                    parameters: [
+                        { name: 'className', type: 'string', description: 'Nombre de la clase a filtrar' }
+                    ],
+                    response: 'Array de objetos con jugadores de la clase especificada'
+                },
+                {
+                    path: '/rankings/stats',
+                    method: 'GET',
+                    description: 'Obtener estadísticas básicas del ranking',
+                    parameters: [],
+                    response: 'Objeto JSON con estadísticas como promedio de power score, distribución por servidor y por clase'
+                },
+                {
+                    path: '/servers',
+                    method: 'GET',
+                    description: 'Listar todas las regiones y servidores disponibles',
+                    parameters: [],
+                    response: 'Objeto JSON con todas las regiones y servidores organizados jerárquicamente'
+                },
+                {
+                    path: '/rankings/region/:region/server/:server',
+                    method: 'GET',
+                    description: 'Obtener el ranking de un servidor específico',
+                    parameters: [
+                        { name: 'region', type: 'string', description: 'Nombre de la región' },
+                        { name: 'server', type: 'string', description: 'Nombre del servidor' },
+                        { name: 'refresh', type: 'boolean', description: 'Opcional. Si es "true" fuerza una actualización del caché', in: 'query' }
+                    ],
+                    response: 'Array de objetos con jugadores del servidor específico'
+                },
+                {
+                    path: '/rankings/search/:characterName',
+                    method: 'GET',
+                    description: 'Buscar un personaje en todos los servidores registrados',
+                    parameters: [
+                        { name: 'characterName', type: 'string', description: 'Nombre del personaje a buscar' }
+                    ],
+                    response: 'Array de objetos con los resultados encontrados en todos los servidores'
+                },
+                {
+                    path: '/rankings/clan-global/:clanName',
+                    method: 'GET',
+                    description: 'Buscar jugadores por clan en todos los servidores',
+                    parameters: [
+                        { name: 'clanName', type: 'string', description: 'Nombre del clan a buscar' }
+                    ],
+                    response: 'Array de objetos con los resultados encontrados en todos los servidores'
+                },
+                {
+                    path: '/cache/stats',
+                    method: 'GET',
+                    description: 'Ver estadísticas del caché',
+                    parameters: [],
+                    response: 'Objeto JSON con estadísticas del sistema de caché'
+                },
+                {
+                    path: '/cache/clear',
+                    method: 'POST',
+                    description: 'Limpiar el caché del sistema',
+                    parameters: [],
+                    response: 'Objeto JSON con confirmación de limpieza'
+                },
+                {
+                    path: '/prefetch/status',
+                    method: 'GET',
+                    description: 'Ver el estado actual del prefetch',
+                    parameters: [],
+                    response: 'Objeto JSON con información sobre el estado del proceso de prefetch'
+                },
+                {
+                    path: '/prefetch/start',
+                    method: 'POST',
+                    description: 'Iniciar manualmente un proceso de prefetch',
+                    parameters: [],
+                    response: 'Objeto JSON con confirmación de inicio del proceso'
+                }
+            ],
+            ejemplos: {
+                "obtenerTodosLosRankings": `${req.protocol}://${req.get('host')}/rankings`,
+                "buscarPorServidor": `${req.protocol}://${req.get('host')}/rankings/server/ASIA011`,
+                "buscarPorClan": `${req.protocol}://${req.get('host')}/rankings/clan/Dragon`,
+                "buscarPorClase": `${req.protocol}://${req.get('host')}/rankings/class/Warrior`,
+                "buscarPersonaje": `${req.protocol}://${req.get('host')}/rankings/search/DragonSlayer`
+            },
+            estructuraDeDatos: {
+                "jugador": {
+                    "rank": "Posición en el ranking",
+                    "character": "Nombre del personaje",
+                    "powerScore": "Puntuación de poder",
+                    "level": "Nivel del personaje",
+                    "clan": "Clan al que pertenece",
+                    "class": "Clase del personaje",
+                    "server": "Servidor del jugador"
+                }
+            }
+        });
+        logger.success('Documentación de la API enviada', 'API');
+    } catch (error) {
+        logger.error(`Error al servir la documentación: ${error.message}`, 'API');
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
 // Endpoint para obtener todo el ranking
 router.get('/rankings', async (req, res) => {
     try {

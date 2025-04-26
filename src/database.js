@@ -19,7 +19,8 @@ const DB_CONFIG = {
     database: process.env.DB_NAME,
     waitForConnections: true,
     connectionLimit: 10,
-    queueLimit: 0
+    queueLimit: 0,
+    charset: 'utf8mb4' // Especificar charset para evitar problemas de codificación
 };
 
 // Variable para almacenar la conexión de pool
@@ -36,9 +37,11 @@ async function initializeDatabase() {
         
         // Crear tablas si no existen
         await initDatabase();
+        return true;
     } catch (error) {
         logger.error(`Error al conectar con la base de datos: ${error.message}`, 'Database');
-        throw error;
+        // No lanzar el error para permitir que la aplicación continúe
+        return false;
     }
 }
 
@@ -627,11 +630,13 @@ async function getActiveServersList() {
     }
 }
 
-// Inicializar la base de datos al cargar el módulo
-initializeDatabase().catch(err => {
-    logger.error(`Error al inicializar la base de datos: ${err.message}`, 'Database');
-    process.exit(1);
-});
+// Solo inicializar la base de datos automáticamente si no estamos en entorno de prueba
+if (process.env.NODE_ENV !== 'test') {
+    initializeDatabase().catch(err => {
+        logger.error(`Error al inicializar la base de datos: ${err.message}`, 'Database');
+        // No terminamos el proceso para permitir que la app funcione sin DB si es necesario
+    });
+}
 
 module.exports = {
     pool,
@@ -645,5 +650,6 @@ module.exports = {
     getActiveServers,
     getServerRankings,
     logUpdateOperation,
-    getActiveServersList
+    getActiveServersList,
+    initializeDatabase // Exportamos la función para poder llamarla explícitamente cuando sea necesario
 };
