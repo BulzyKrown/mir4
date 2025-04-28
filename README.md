@@ -10,6 +10,7 @@ Esta API proporciona acceso a los datos del ranking de Power Score de MIR4, incl
 - Estadísticas generales del ranking
 - Almacenamiento en caché para optimizar el rendimiento
 - Actualizaciones periódicas de los datos
+- Manejo de errores y reintentos automáticos
 
 ## Requisitos previos
 
@@ -34,7 +35,14 @@ La configuración del proyecto se encuentra en `src/config.js`. Los principales 
 - `PORT`: Puerto en el que se ejecutará la API (por defecto: 3000)
 - `MAX_FILE_AGE_MS`: Tiempo de vida de las páginas scrapeadas (1 minuto en milisegundos)
 - `CLEANUP_CRON`: Expresión cron para la limpieza de archivos (cada 5 minutos)
+- `PREFETCH_CRON`: Expresión cron para prefetch automático (cada 12 horas)
 - `SERVER_REGIONS`: Mapa de regiones y servidores con sus respectivos IDs
+
+Crea un archivo `.env` basado en el archivo `example.env` proporcionado:
+
+```bash
+cp example.env .env
+```
 
 ## Uso
 
@@ -331,7 +339,7 @@ La API automáticamente podrá buscar en estos nuevos servidores sin necesidad d
 ## Estructura del proyecto
 
 ```
-├── data/                  # Datos persistentes
+├── data/                  # Datos persistentes y estado de prefetch
 ├── scraped_pages/         # HTML de páginas scrapeadas (temporal)
 ├── src/
 │   ├── cache.js           # Sistema de caché
@@ -339,57 +347,78 @@ La API automáticamente podrá buscar en estos nuevos servidores sin necesidad d
 │   ├── logger.js          # Sistema de logs
 │   ├── routes.js          # Definición de endpoints
 │   ├── scraper.js         # Lógica de scraping
+│   ├── prefetch.js        # Sistema de prefetch automático
 │   └── utils.js           # Funciones auxiliares
 ├── tests/                 # Tests unitarios y de integración
 ├── index.js               # Punto de entrada
 └── package.json           # Dependencias y scripts
 ```
 
+## Manejo de Errores
+
+El sistema incluye un mecanismo de manejo de errores para detectar y solucionar problemas durante el scraping. Los archivos de error (como `error_ASIA1_ASIA044_page_1.png`) son capturas de pantalla automáticas generadas cuando ocurre un error durante el scraping de un servidor específico.
+
+### Tipos de errores comunes y soluciones:
+
+1. **Errores de conexión**: Ocurren cuando hay problemas para conectar con el servidor de MIR4. El sistema reintentará la conexión automáticamente.
+
+2. **Errores de estructura HTML**: Si la web de MIR4 cambia su estructura, estos errores se registran para actualizar el parser.
+
+3. **Errores de tiempo de espera**: Cuando el servidor de MIR4 tarda demasiado en responder. El sistema aumenta gradualmente el tiempo de espera.
+
+4. **Errores de región/servidor inválido**: Cuando se intenta acceder a un servidor que no existe o ha sido eliminado.
+
+Para resolver errores persistentes:
+
+1. Revisar las capturas de error en la raíz del proyecto
+2. Verificar los logs para obtener detalles adicionales
+3. Ajustar los tiempos de espera o reintentos en `src/config.js` si es necesario
+4. Actualizar los selectores HTML si la web de MIR4 ha cambiado
+
 ## Pruebas
 
-Para ejecutar los tests:
+El proyecto incluye pruebas unitarias y de integración para garantizar su correcto funcionamiento. Se utilizan Jest y Supertest para las pruebas.
+
+### Ejecución de pruebas
 
 ```bash
+# Ejecutar todas las pruebas
 npm test
-```
 
-Para generar un informe de cobertura:
-
-```bash
+# Ejecutar pruebas con coverage
 npm test -- --coverage
+
+# Ejecutar un grupo específico de pruebas
+npm test -- routes.test.js
+
+# Ejecutar pruebas en modo watch (útil durante desarrollo)
+npm test -- --watch
 ```
 
-## Desarrollo
+### Estructura de pruebas
 
-Al iniciar el servidor en modo desarrollo, los cambios en el código se recargan automáticamente gracias a nodemon.
+- **routes.test.js**: Prueba los endpoints de la API con datos reales
+- **routes.mock.test.js**: Prueba los endpoints con datos simulados (sin dependencia externa)
+- **index.test.js**: Prueba la inicialización y configuración de la aplicación
+- **setup.js**: Configuración general para las pruebas
+- **teardown.js**: Limpieza después de las pruebas
 
-### Sistema de logs
+### Añadir nuevas pruebas
 
-La API incluye un sistema de logs en colores para facilitar el desarrollo:
-- Verde: Información de éxito
-- Azul: Información general
-- Amarillo: Advertencias
-- Rojo: Errores
+Para añadir nuevas pruebas, crea un archivo con el nombre `[nombre].test.js` en la carpeta `tests/` siguiendo el patrón existente:
 
-## Manejo de archivos temporales
+```javascript
+const request = require('supertest');
+const app = require('../index');
 
-Los archivos HTML descargados se guardan temporalmente en la carpeta `scraped_pages/` y se eliminan automáticamente después de 1 minuto para no ocupar espacio innecesario.
-
-## Sistema de caché
-
-La API implementa varios niveles de caché para optimizar el rendimiento:
-- Caché principal para rankings globales
-- Caché específico por servidor para consultas a servidores individuales
-- Caché de consultas para búsquedas específicas
-
-El tiempo de vida del caché es configurable en `src/cache.js` (por defecto, 5 minutos).
-
-## Limitaciones
-
-- La API solo muestra los datos que están disponibles públicamente en la página de rankings de MIR4.
-- Las actualizaciones de los rankings siguen el horario oficial del juego (02:00 UTC+8).
-- El rendimiento puede verse afectado si se realizan demasiadas solicitudes simultáneas.
-- La búsqueda en múltiples servidores puede tardar más tiempo la primera vez, ya que necesita recolectar datos de cada servidor.
+describe('Nombre de la suite de pruebas', () => {
+    it('debería hacer algo específico', async () => {
+        const response = await request(app).get('/ruta/a/probar');
+        expect(response.status).toBe(200);
+        // Más aserciones...
+    });
+});
+```
 
 ## Contribución
 
