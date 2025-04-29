@@ -164,12 +164,14 @@ async function isServerDataUpdatedAfterReset(regionName, serverName) {
  * @param {boolean} options.interactive - Si se debe preguntar al usuario antes de continuar después de errores
  * @param {number} options.confirmEvery - Número de servidores a procesar antes de pedir confirmación
  * @param {boolean} options.forceUpdate - Si se debe forzar la actualización aunque los datos ya estén actualizados
+ * @param {number} options.maxConsecutiveFailures - Máximo número de fallos consecutivos permitidos antes de pausar
  */
 async function prefetchAllServers(options = {}) {
     const { 
         interactive = false, 
         confirmEvery = 5,
-        forceUpdate = false
+        forceUpdate = false,
+        maxConsecutiveFailures = 5 // Nuevo parámetro para limitar fallos consecutivos
     } = options;
     
     // Evitar ejecuciones simultáneas
@@ -186,6 +188,7 @@ async function prefetchAllServers(options = {}) {
     prefetchStatus.serversProcessed = 0;
     prefetchStatus.paused = false;
     prefetchStatus.skippedServers = 0; // Contador de servidores omitidos por estar actualizados
+    prefetchStatus.consecutiveFailures = 0; // Nuevo contador para fallos consecutivos
     
     // Crear lista de todos los servidores
     const servers = [];
@@ -213,9 +216,16 @@ async function prefetchAllServers(options = {}) {
     
     // Procesar cada servidor secuencialmente para no saturar el sistema
     for (const server of servers) {
-        // Si el prefetch fue pausado por el usuario, salir del bucle
+        // Si el prefetch fue pausado por el usuario o alcanzamos el límite de fallos, salir del bucle
         if (prefetchStatus.paused) {
             logger.info('Prefetch detenido por el usuario', 'Prefetch');
+            break;
+        }
+
+        // Verificar si hemos alcanzado el máximo de fallos consecutivos
+        if (prefetchStatus.consecutiveFailures >= maxConsecutiveFailures) {
+            logger.warn(`Se alcanzó el límite de ${maxConsecutiveFailures} fallos consecutivos. Pausando el prefetch.`, 'Prefetch');
+            prefetchStatus.paused = true;
             break;
         }
 
@@ -226,13 +236,25 @@ async function prefetchAllServers(options = {}) {
                 logger.info(`Omitiendo servidor ${server.regionName} > ${server.serverName}: datos ya actualizados después del último reset`, 'Prefetch');
                 prefetchStatus.skippedServers++;
                 prefetchStatus.serversProcessed++; // Incrementar contador aunque se omita
+                prefetchStatus.consecutiveFailures = 0; // Resetear contador de fallos cuando omitimos con éxito
                 continue; // Saltar a la siguiente iteración
             }
             
             logger.info(`Procesando servidor: ${server.regionName} > ${server.serverName}`, 'Prefetch');
             
             const startTime = Date.now();
-            const rankings = await fetchServerRankingData(server.regionName, server.serverName, true);
+            
+            // Configurar un timeout para la operación completa
+            const timeoutPromise = new Promise((_, reject) => {
+                setTimeout(() => reject(new Error('Timeout: La operación tardó demasiado')), 300000); // 5 minutos de timeout
+            });
+            
+            // Ejecutar el scraping con un timeout
+            const rankingsPromise = fetchServerRankingData(server.regionName, server.serverName, true);
+            
+            // Esperar a que se complete el scraping o se alcance el timeout
+            const rankings = await Promise.race([rankingsPromise, timeoutPromise]);
+            
             const endTime = Date.now();
             
             if (rankings && rankings.length > 0) {
@@ -243,6 +265,9 @@ async function prefetchAllServers(options = {}) {
                 saveServerRankings(rankings, server.regionName, server.serverName);
                 
                 logger.success(`Servidor ${server.regionName} > ${server.serverName} procesado: ${rankings.length} jugadores en ${(endTime - startTime) / 1000}s`, 'Prefetch');
+                
+                // Resetear contador de fallos consecutivos cuando tenemos éxito
+                prefetchStatus.consecutiveFailures = 0;
             } else {
                 // Si no hay rankings es probable que el servidor no exista
                 logger.warn(`Servidor ${server.regionName} > ${server.serverName} no devolvió datos, posiblemente no existe`, 'Prefetch');
@@ -251,6 +276,7 @@ async function prefetchAllServers(options = {}) {
                 markServerAsInactive(server.regionName, server.serverName);
                 
                 prefetchStatus.errors.push(`${server.regionName} > ${server.serverName}: Servidor posiblemente inexistente`);
+                prefetchStatus.consecutiveFailures++;
                 
                 // Si estamos en modo interactivo, preguntar si continuar después de un servidor sin datos
                 if (interactive) {
@@ -273,10 +299,13 @@ async function prefetchAllServers(options = {}) {
                 if (!shouldContinue) break;
             }
             
-            // Pequeña pausa para no sobrecargar el servidor objetivo
-            await new Promise(resolve => setTimeout(resolve, 1000)); // 1 segundo de pausa
+            // Pequeña pausa para no sobrecargar el servidor objetivo y permitir la liberación de recursos
+            await new Promise(resolve => setTimeout(resolve, 3000)); // 3 segundos de pausa (aumentado para dar tiempo al GC)
             
         } catch (error) {
+            // Incrementar contador de fallos consecutivos
+            prefetchStatus.consecutiveFailures++;
+            
             logger.error(`Error al procesar servidor ${server.regionName} > ${server.serverName}: ${error.message}`, 'Prefetch');
             
             prefetchStatus.errors.push(`${server.regionName} > ${server.serverName}: ${error.message}`);
@@ -289,10 +318,29 @@ async function prefetchAllServers(options = {}) {
             // Marcar el servidor como inactivo en caso de error
             markServerAsInactive(server.regionName, server.serverName);
             
+            // Verificar si el error parece ser un problema de recursos o conexión
+            const isResourceError = error.message.includes('Target closed') || 
+                error.message.includes('Session closed') ||
+                error.message.includes('frame got detached') ||
+                error.message.includes('Cannot find browser') ||
+                error.message.includes('out of memory') ||
+                error.message.includes('Timeout');
+                
+            if (isResourceError) {
+                logger.warn(`Error de recursos detectado. Esperando 10 segundos antes de continuar...`, 'Prefetch');
+                await new Promise(resolve => setTimeout(resolve, 10000)); // 10 segundos de pausa
+            }
+            
             // Si estamos en modo interactivo, preguntar si continuar después de un error
             if (interactive) {
                 const shouldContinue = await askToContinue(`Se produjo un error al procesar el servidor ${server.regionName} > ${server.serverName}: ${error.message}`);
                 if (!shouldContinue) break;
+            }
+            
+            // Verificar si hemos alcanzado el máximo de fallos consecutivos
+            if (prefetchStatus.consecutiveFailures >= maxConsecutiveFailures) {
+                logger.warn(`Se alcanzó el límite de ${maxConsecutiveFailures} fallos consecutivos. Pausando el prefetch.`, 'Prefetch');
+                prefetchStatus.paused = true;
             }
         }
     }

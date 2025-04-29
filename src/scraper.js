@@ -228,9 +228,12 @@ async function shouldContinueScraping(scrapedData, regionName = null, serverName
  * @param {string} regionName - Nombre de la región (ej: ASIA, IMENA)
  * @param {string} serverName - Nombre del servidor (ej: ASIA011, IMENA011)
  * @param {boolean} forceRefresh - Si es true, ignora el caché y hace un nuevo scraping
+ * @param {number} retryCount - Número de intentos realizados (para manejo de reintentos)
  * @returns {Promise<Array>} - Datos de rankings procesados
  */
-async function fetchServerRankingData(regionName, serverName, forceRefresh = false) {
+async function fetchServerRankingData(regionName, serverName, forceRefresh = false, retryCount = 0) {
+    let browser = null;
+    
     try {
         // Clave para el caché específico de este servidor
         const cacheKey = `${regionName}_${serverName}`;
@@ -250,17 +253,34 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
         const serverUrl = buildServerUrl(regionName, serverName);
         logger.scraper(`URL del servidor: ${serverUrl}`);
         
-        // Iniciar el navegador usando configuración predeterminada de Puppeteer
+        // Iniciar el navegador
         const browser = await puppeteer.launch({
             headless: CONFIG.BROWSER_HEADLESS,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-web-security']
+            args: [
+                '--no-sandbox', 
+                '--disable-setuid-sandbox', 
+                '--disable-web-security',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--single-process'
+            ],
+            timeout: 60000 // 60 segundos para iniciar el navegador
         });
         
         const page = await browser.newPage();
+        await page.setDefaultNavigationTimeout(60000); // 60 segundos para la navegación
+        await page.setDefaultTimeout(30000); // 30 segundos para otras operaciones
         await page.setViewport({ width: 1280, height: 800 });
         
         // Establecer los headers
         await page.setExtraHTTPHeaders(HEADERS);
+        
+        // Manejar errores de página
+        page.on('error', error => {
+            logger.error(`Error de página para ${regionName} > ${serverName}: ${error}`, 'Scraper');
+        });
         
         try {
             // Navegar a la página de ranking del servidor específico
@@ -299,6 +319,7 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
                 if (!shouldContinue) {
                     logger.scraper(`Usando datos existentes para ${regionName} > ${serverName}, omitiendo scraping adicional`);
                     await browser.close();
+                    browser = null;
                     
                     const existingData = getServerCache(cacheKey);
                     if (existingData) {
@@ -332,6 +353,9 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
                     await page.waitForSelector(CONFIG.LOAD_MORE_BUTTON_SELECTOR, { 
                         visible: true,
                         timeout: 5000
+                    }).catch(err => {
+                        logger.debug(`Botón no encontrado: ${err.message}`, 'Scraper');
+                        return null;
                     });
                     
                     const loadMoreButton = await page.$(CONFIG.LOAD_MORE_BUTTON_SELECTOR);
@@ -344,33 +368,59 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
                     logger.scraper(`Haciendo clic para cargar página ${pagesLoaded + 1}...`);
                     
                     // Extraer el texto del botón para debugging
-                    const buttonText = await page.evaluate(button => button.textContent, loadMoreButton);
+                    const buttonText = await page.evaluate(button => button.textContent, loadMoreButton)
+                        .catch(err => {
+                            logger.debug(`No se pudo obtener texto del botón: ${err.message}`, 'Scraper');
+                            return "Desconocido";
+                        });
                     logger.scraper(`Texto del botón: "${buttonText}"`);
                     
                     // Contar elementos antes del clic
-                    const countBefore = await page.$$eval('tr.list_article', rows => rows.length);
+                    const countBefore = await page.$$eval('tr.list_article', rows => rows.length)
+                        .catch(err => {
+                            logger.debug(`Error al contar elementos: ${err.message}`, 'Scraper');
+                            return 0;
+                        });
                     logger.scraper(`Elementos antes del clic: ${countBefore}`);
                     
                     // Hacer clic en el botón
-                    await loadMoreButton.click();
+                    await loadMoreButton.click().catch(err => {
+                        logger.error(`Error al hacer clic en el botón: ${err.message}`, 'Scraper');
+                        throw err; // Propagar el error
+                    });
                     
-                    // Esperar a que se carguen los nuevos datos (esperar a que aumente el número de filas)
+                    // Esperar a que se carguen los nuevos datos con manejo de errores
                     logger.scraper(`Esperando a que se carguen nuevos datos...`);
-                    await page.waitForFunction(
-                        (previousCount) => {
-                            const currentCount = document.querySelectorAll('tr.list_article').length;
-                            return currentCount > previousCount;
-                        },
-                        { timeout: 10000 },
-                        countBefore
-                    );
+                    try {
+                        await page.waitForFunction(
+                            (previousCount) => {
+                                const currentCount = document.querySelectorAll('tr.list_article').length;
+                                return currentCount > previousCount;
+                            },
+                            { timeout: 10000 },
+                            countBefore
+                        );
+                    } catch (waitError) {
+                        logger.error(`Error al esperar nuevos datos: ${waitError.message}`, 'Scraper');
+                        // Verificar si la página todavía está disponible
+                        if (waitError.message.includes('Target closed') || 
+                            waitError.message.includes('Session closed') || 
+                            waitError.message.includes('frame got detached')) {
+                            throw waitError; // Propagar errores críticos
+                        }
+                        // Para otros errores, intentamos continuar
+                        break;
+                    }
                     
                     // Esperar un tiempo adicional para asegurar que todo se haya cargado
-                    // Reemplazar waitForTimeout con una espera usando setTimeout
                     await new Promise(resolve => setTimeout(resolve, CONFIG.WAIT_BETWEEN_CLICKS_MS));
                     
                     // Contar elementos después del clic
-                    const countAfter = await page.$$eval('tr.list_article', rows => rows.length);
+                    const countAfter = await page.$$eval('tr.list_article', rows => rows.length)
+                        .catch(err => {
+                            logger.debug(`Error al contar elementos después: ${err.message}`, 'Scraper');
+                            return 0;
+                        });
                     logger.scraper(`Elementos después del clic: ${countAfter} (añadidos: ${countAfter - countBefore})`);
                     
                     // Obtener el nuevo contenido y parsear los datos
@@ -393,15 +443,28 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
                     await saveScrapedHtml(currentPageHtml, `${htmlFileName}_page_${pagesLoaded}`);
                 } catch (btnError) {
                     logger.error(`Error al cargar más páginas: ${btnError}`, 'Scraper');
-                    // Tomar una captura de pantalla para debugging
-                    await page.screenshot({path: `error_${regionName}_${serverName}_page_${pagesLoaded}.png`});
-                    logger.scraper(`Se guardó una captura de pantalla en error_${regionName}_${serverName}_page_${pagesLoaded}.png`);
+                    
+                    // Verificar si es un error crítico relacionado con el cierre de sesión
+                    if (btnError.message.includes('Target closed') || 
+                        btnError.message.includes('Session closed') || 
+                        btnError.message.includes('frame got detached')) {
+                        throw btnError; // Propagar el error para reintentar
+                    }
+                    
+                    // Para otros errores, intentamos tomar una captura y continuamos
+                    try {
+                        await page.screenshot({path: `error_${regionName}_${serverName}_page_${pagesLoaded}.png`}).catch(() => {});
+                        logger.scraper(`Se guardó una captura de pantalla en error_${regionName}_${serverName}_page_${pagesLoaded}.png`);
+                    } catch (screenshotError) {
+                        logger.error(`No se pudo tomar captura de pantalla: ${screenshotError.message}`, 'Scraper');
+                    }
                     break;
                 }
             }
             
-            // Cerrar el navegador
+            // Cerrar el navegador correctamente
             await browser.close();
+            browser = null;
             
             if (allRankings.length === 0) {
                 logger.error(`No se encontraron datos en la página de ${regionName} > ${serverName}`, 'Scraper');
@@ -430,14 +493,38 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
             return allRankings;
         } catch (pageError) {
             logger.error(`Error en la navegación para ${regionName} > ${serverName}: ${pageError}`, 'Scraper');
-            await browser.close();
+            
+            // Cerrar el navegador si aún está abierto
+            if (browser) {
+                await browser.close().catch(() => {});
+                browser = null;
+            }
+            
             throw pageError;
         }
     } catch (error) {
-        logger.error(`Error fetchServerRankingData para ${regionName} > ${serverName}: ${error.message}`, 'Scraper');
-        if (error.response) {
-            logger.error(`Response status: ${error.response.status}`, 'Scraper');
+        // Cerrar el navegador si aún está abierto
+        if (browser) {
+            await browser.close().catch(() => {});
         }
+        
+        logger.error(`Error fetchServerRankingData para ${regionName} > ${serverName}: ${error.message}`, 'Scraper');
+        
+        // Implementar reintentos para errores relacionados con el cierre de la sesión
+        const MAX_RETRIES = 3;
+        if (retryCount < MAX_RETRIES && (
+            error.message.includes('Target closed') || 
+            error.message.includes('Session closed') || 
+            error.message.includes('frame got detached')
+        )) {
+            // Esperar un poco antes de reintentar
+            const waitTime = (retryCount + 1) * 2000; // Espera incremental: 2s, 4s, 6s
+            logger.warn(`Reintentando en ${waitTime/1000}s (intento ${retryCount + 1} de ${MAX_RETRIES})...`, 'Scraper');
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+            
+            return fetchServerRankingData(regionName, serverName, forceRefresh, retryCount + 1);
+        }
+        
         throw error;
     }
 }
@@ -445,9 +532,12 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
 /**
  * Obtiene y parsea los datos del ranking de MIR4 usando Puppeteer para cargar todos los jugadores
  * @param {boolean} forceRefresh - Si es true, ignora el caché y hace un nuevo scraping
+ * @param {number} retryCount - Número de intentos realizados (para manejo de reintentos)
  * @returns {Promise<Array>} - Datos de rankings procesados
  */
-async function fetchRankingData(forceRefresh = false) {
+async function fetchRankingData(forceRefresh = false, retryCount = 0) {
+    let browser = null;
+    
     try {
         // Verificar si tenemos datos en caché y no se forzó refresco
         if (!forceRefresh) {
@@ -460,17 +550,34 @@ async function fetchRankingData(forceRefresh = false) {
         
         logger.scraper('Iniciando scraping completo del ranking desde la fuente...');
         
-        // Iniciar el navegador usando Puppeteer
+        // Iniciar el navegador
         const browser = await puppeteer.launch({
             headless: CONFIG.BROWSER_HEADLESS,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-web-security']
+            args: [
+                '--no-sandbox', 
+                '--disable-setuid-sandbox', 
+                '--disable-web-security',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--single-process'
+            ],
+            timeout: 60000 // 60 segundos para iniciar el navegador
         });
         
         const page = await browser.newPage();
+        await page.setDefaultNavigationTimeout(60000); // 60 segundos para la navegación
+        await page.setDefaultTimeout(30000); // 30 segundos para otras operaciones
         await page.setViewport({ width: 1280, height: 800 });
         
         // Establecer los headers
         await page.setExtraHTTPHeaders(HEADERS);
+        
+        // Manejar errores de página
+        page.on('error', error => {
+            logger.error(`Error de página: ${error}`, 'Scraper');
+        });
         
         try {
             // Navegar a la página de ranking
@@ -487,7 +594,6 @@ async function fetchRankingData(forceRefresh = false) {
                 if (cookieButton) {
                     await cookieButton.click();
                     logger.scraper('Aceptadas las cookies');
-                    // Reemplazar waitForTimeout con una espera usando setTimeout
                     await new Promise(resolve => setTimeout(resolve, 1000));
                 }
             } catch (cookieError) {
@@ -508,6 +614,7 @@ async function fetchRankingData(forceRefresh = false) {
                 if (!shouldContinue) {
                     logger.scraper('Usando datos existentes, omitiendo scraping adicional');
                     await browser.close();
+                    browser = null;
                     return getMainCache();
                 }
             }
@@ -524,6 +631,9 @@ async function fetchRankingData(forceRefresh = false) {
                     await page.waitForSelector(CONFIG.LOAD_MORE_BUTTON_SELECTOR, { 
                         visible: true,
                         timeout: 5000
+                    }).catch(err => {
+                        logger.debug(`Botón no encontrado: ${err.message}`, 'Scraper');
+                        return null;
                     });
                     
                     const loadMoreButton = await page.$(CONFIG.LOAD_MORE_BUTTON_SELECTOR);
@@ -536,33 +646,59 @@ async function fetchRankingData(forceRefresh = false) {
                     logger.scraper(`Haciendo clic para cargar página ${pagesLoaded + 1}...`);
                     
                     // Extraer el texto del botón para debugging
-                    const buttonText = await page.evaluate(button => button.textContent, loadMoreButton);
+                    const buttonText = await page.evaluate(button => button.textContent, loadMoreButton)
+                        .catch(err => {
+                            logger.debug(`No se pudo obtener texto del botón: ${err.message}`, 'Scraper');
+                            return "Desconocido";
+                        });
                     logger.scraper(`Texto del botón: "${buttonText}"`);
                     
                     // Contar elementos antes del clic
-                    const countBefore = await page.$$eval('tr.list_article', rows => rows.length);
+                    const countBefore = await page.$$eval('tr.list_article', rows => rows.length)
+                        .catch(err => {
+                            logger.debug(`Error al contar elementos: ${err.message}`, 'Scraper');
+                            return 0;
+                        });
                     logger.scraper(`Elementos antes del clic: ${countBefore}`);
                     
                     // Hacer clic en el botón
-                    await loadMoreButton.click();
+                    await loadMoreButton.click().catch(err => {
+                        logger.error(`Error al hacer clic en el botón: ${err.message}`, 'Scraper');
+                        throw err; // Propagar el error
+                    });
                     
-                    // Esperar a que se carguen los nuevos datos (esperar a que aumente el número de filas)
+                    // Esperar a que se carguen los nuevos datos con manejo de errores
                     logger.scraper(`Esperando a que se carguen nuevos datos...`);
-                    await page.waitForFunction(
-                        (previousCount) => {
-                            const currentCount = document.querySelectorAll('tr.list_article').length;
-                            return currentCount > previousCount;
-                        },
-                        { timeout: 10000 },
-                        countBefore
-                    );
+                    try {
+                        await page.waitForFunction(
+                            (previousCount) => {
+                                const currentCount = document.querySelectorAll('tr.list_article').length;
+                                return currentCount > previousCount;
+                            },
+                            { timeout: 10000 },
+                            countBefore
+                        );
+                    } catch (waitError) {
+                        logger.error(`Error al esperar nuevos datos: ${waitError.message}`, 'Scraper');
+                        // Verificar si la página todavía está disponible
+                        if (waitError.message.includes('Target closed') || 
+                            waitError.message.includes('Session closed') || 
+                            waitError.message.includes('frame got detached')) {
+                            throw waitError; // Propagar errores críticos
+                        }
+                        // Para otros errores, intentamos continuar
+                        break;
+                    }
                     
                     // Esperar un tiempo adicional para asegurar que todo se haya cargado
-                    // Reemplazar waitForTimeout con una espera usando setTimeout
                     await new Promise(resolve => setTimeout(resolve, CONFIG.WAIT_BETWEEN_CLICKS_MS));
                     
                     // Contar elementos después del clic
-                    const countAfter = await page.$$eval('tr.list_article', rows => rows.length);
+                    const countAfter = await page.$$eval('tr.list_article', rows => rows.length)
+                        .catch(err => {
+                            logger.debug(`Error al contar elementos después: ${err.message}`, 'Scraper');
+                            return 0;
+                        });
                     logger.scraper(`Elementos después del clic: ${countAfter} (añadidos: ${countAfter - countBefore})`);
                     
                     // Obtener el nuevo contenido y parsear los datos
@@ -585,15 +721,28 @@ async function fetchRankingData(forceRefresh = false) {
                     await saveScrapedHtml(currentPageHtml, `ranking_page_${pagesLoaded}`);
                 } catch (btnError) {
                     logger.error(`Error al cargar más páginas: ${btnError}`, 'Scraper');
-                    // Tomar una captura de pantalla para debugging
-                    await page.screenshot({path: `error_page_${pagesLoaded}.png`});
-                    logger.scraper(`Se guardó una captura de pantalla en error_page_${pagesLoaded}.png`);
+                    
+                    // Verificar si es un error crítico relacionado con el cierre de sesión
+                    if (btnError.message.includes('Target closed') || 
+                        btnError.message.includes('Session closed') || 
+                        btnError.message.includes('frame got detached')) {
+                        throw btnError; // Propagar el error para reintentar
+                    }
+                    
+                    // Para otros errores, intentamos tomar una captura y continuamos
+                    try {
+                        await page.screenshot({path: `error_page_${pagesLoaded}.png`}).catch(() => {});
+                        logger.scraper(`Se guardó una captura de pantalla en error_page_${pagesLoaded}.png`);
+                    } catch (screenshotError) {
+                        logger.error(`No se pudo tomar captura de pantalla: ${screenshotError.message}`, 'Scraper');
+                    }
                     break;
                 }
             }
             
-            // Cerrar el navegador
+            // Cerrar el navegador correctamente
             await browser.close();
+            browser = null;
             
             if (allRankings.length === 0) {
                 logger.error('No se encontraron datos en la página', 'Scraper');
@@ -615,14 +764,41 @@ async function fetchRankingData(forceRefresh = false) {
             return allRankings;
         } catch (pageError) {
             logger.error(`Error en la navegación: ${pageError}`, 'Scraper');
-            await browser.close();
+            
+            // Cerrar el navegador si aún está abierto
+            if (browser) {
+                await browser.close().catch(() => {});
+                browser = null;
+            }
+            
             throw pageError;
         }
     } catch (error) {
+        // Cerrar el navegador si aún está abierto
+        if (browser) {
+            await browser.close().catch(() => {});
+        }
+        
         logger.error(`Error fetchRankingData: ${error.message}`, 'Scraper');
         if (error.response) {
             logger.error(`Response status: ${error.response.status}`, 'Scraper');
         }
+        
+        // Implementar reintentos para errores relacionados con el cierre de la sesión
+        const MAX_RETRIES = 3;
+        if (retryCount < MAX_RETRIES && (
+            error.message.includes('Target closed') || 
+            error.message.includes('Session closed') || 
+            error.message.includes('frame got detached')
+        )) {
+            // Esperar un poco antes de reintentar
+            const waitTime = (retryCount + 1) * 2000; // Espera incremental: 2s, 4s, 6s
+            logger.warn(`Reintentando en ${waitTime/1000}s (intento ${retryCount + 1} de ${MAX_RETRIES})...`, 'Scraper');
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+            
+            return fetchRankingData(forceRefresh, retryCount + 1);
+        }
+        
         throw error;
     }
 }

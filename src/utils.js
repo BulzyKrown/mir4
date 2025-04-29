@@ -119,8 +119,62 @@ function cleanupOldFiles() {
     }
 }
 
+/**
+ * Calcula la similitud entre dos objetos de detalles de personaje
+ * @param {Object} existingDetails - Detalles existentes del personaje
+ * @param {Object} newDetails - Nuevos detalles del personaje
+ * @returns {number} - Porcentaje de similitud (0-100)
+ */
+function calculateDetailsSimilarity(existingDetails, newDetails) {
+    const keyFields = [
+        'level', 'prestigeLevel', 'equipmentScore', 
+        'spiritScore', 'energyScore', 'magicalStoneScore',
+        'codexScore', 'trophyScore', 'ethics'
+    ];
+    
+    let totalFields = keyFields.length;
+    let matchingFields = 0;
+    
+    // Comparar campos numéricos
+    for (const field of keyFields) {
+        // Si los valores son idénticos o muy cercanos (diferencia menor al 5%)
+        if (existingDetails[field] === newDetails[field] || 
+            (existingDetails[field] > 0 && newDetails[field] > 0 && 
+             Math.abs(existingDetails[field] - newDetails[field]) / existingDetails[field] < 0.05)) {
+            matchingFields++;
+        }
+    }
+    
+    // Comparar logros si existen
+    if (existingDetails.achievements && newDetails.achievements) {
+        totalFields++;
+        
+        // Si los arrays de logros tienen longitud similar y al menos 80% de logros coinciden
+        const existingAchievements = Array.isArray(existingDetails.achievements) ? 
+            existingDetails.achievements : JSON.parse(existingDetails.achievements || '[]');
+            
+        const newAchievements = Array.isArray(newDetails.achievements) ? 
+            newDetails.achievements : [];
+            
+        if (Math.abs(existingAchievements.length - newAchievements.length) <= 2) {
+            const similarAchievements = existingAchievements.filter(a => 
+                newAchievements.some(na => na.id === a.id || na.name === a.name)
+            ).length;
+            
+            if (existingAchievements.length === 0 || 
+                similarAchievements / existingAchievements.length >= 0.8) {
+                matchingFields++;
+            }
+        }
+    }
+    
+    // Calcular porcentaje de similitud
+    return (matchingFields / totalFields) * 100;
+}
+
 module.exports = {
     extractImageUrlFromStyle,
     saveScrapedHtml,
-    cleanupOldFiles
+    cleanupOldFiles,
+    calculateDetailsSimilarity
 };

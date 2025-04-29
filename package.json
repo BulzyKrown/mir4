@@ -5,7 +5,7 @@
   "scripts": {
     "test": "jest",
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "node --watch index.js"
   },
   "keywords": [],
   "author": "",
@@ -13,7 +13,6 @@
   "description": "API for MIR4 Power Score Rankings",
   "dependencies": {
     "axios": "^1.8.4",
-    "better-sqlite3": "^11.9.1",
     "chalk": "^4.1.2",
     "cheerio": "^1.0.0",
     "dotenv": "^16.5.0",
@@ -27,16 +26,5 @@
     "@babel/preset-env": "^7.x",
     "jest": "^29.x",
     "supertest": "^6.x"
-  },
-  "jest": {
-    "testEnvironment": "node",
-    "testTimeout": 30000,
-    "testMatch": [
-      "**/tests/**/*.test.js"
-    ],
-    "collectCoverageFrom": [
-      "src/**/*.js"
-    ],
-    "coverageDirectory": "./coverage"
   }
 }
