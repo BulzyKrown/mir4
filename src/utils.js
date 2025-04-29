@@ -4,7 +4,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { CONFIG } = require('./config');
+const { CONFIG, SELECTORS } = require('./config');
 const logger = require('./logger');
 
 /**
@@ -15,8 +15,14 @@ const logger = require('./logger');
 function extractImageUrlFromStyle(styleAttr) {
     if (!styleAttr) return null;
     
-    const match = styleAttr.match(/background-image:\s*url\(['"]?(.*?)['"]?\)/i);
-    return match ? match[1] : null;
+    try {
+        // Usar el regex definido en los selectores configurables
+        const match = styleAttr.match(SELECTORS.STYLE_BACKGROUND_REGEX);
+        return match ? match[1] : null;
+    } catch (error) {
+        logger.error(`Error al extraer URL de imagen: ${error.message}`, 'Utils');
+        return null;
+    }
 }
 
 /**

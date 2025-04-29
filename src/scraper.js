@@ -5,7 +5,7 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 const puppeteer = require('puppeteer');
-const { CHARACTER_CLASSES, HEADERS, CONFIG, SERVER_REGIONS } = require('./config');
+const { CHARACTER_CLASSES, HEADERS, CONFIG, SERVER_REGIONS, SELECTORS, SCRAPER_BEHAVIOR, URLS } = require('./config');
 const { extractImageUrlFromStyle, saveScrapedHtml } = require('./utils');
 const { getMainCache, setMainCache, getServerCache, setServerCache } = require('./cache');
 const { getServerRankings } = require('./database');
@@ -20,34 +20,35 @@ function parseRankingHtml(html) {
     const $ = cheerio.load(html);
     const rankings = [];
 
-    // Seleccionar las filas del ranking
-    $('tr.list_article').each((index, element) => {
+    // Seleccionar las filas del ranking usando los selectores configurables
+    $(SELECTORS.RANKING_ROW).each((index, element) => {
         try {
             const $row = $(element);
             
             // Extraer rank (número de ranking)
-            const rankElement = $row.find('.rank_num .num');
+            const rankElement = $row.find(SELECTORS.RANK_NUMBER);
             const rank = rankElement.text().trim();
             
             // Extraer character y la URL de la imagen
-            const characterElement = $row.find('.user_name');
+            const characterElement = $row.find(SELECTORS.CHARACTER_NAME);
             const character = characterElement.text().trim();
             
-            const userIconElement = $row.find('.user_icon');
+            const userIconElement = $row.find(SELECTORS.CHARACTER_ICON);
             const styleAttr = userIconElement.attr('style');
             const imgUrl = extractImageUrlFromStyle(styleAttr);
+            
             const characterClass = imgUrl ? (CHARACTER_CLASSES[imgUrl] || 'Desconocido') : 'Desconocido';
             
             // Extraer server
-            const serverElement = $row.find('td:nth-child(3) span');
+            const serverElement = $row.find(SELECTORS.SERVER_NAME);
             const server = serverElement.text().trim();
             
             // Extraer clan
-            const clanElement = $row.find('td:nth-child(4) span');
+            const clanElement = $row.find(SELECTORS.CLAN_NAME);
             const clan = clanElement.text().trim();
             
             // Extraer powerScore
-            const powerScoreElement = $row.find('td.text_right span');
+            const powerScoreElement = $row.find(SELECTORS.POWER_SCORE);
             const powerScoreText = powerScoreElement.text().trim();
             const powerScore = powerScoreText ? parseInt(powerScoreText.replace(/,/g, '')) : 0;
             
@@ -162,7 +163,7 @@ async function shouldContinueScraping(scrapedData, regionName = null, serverName
         existingData.forEach(player => {
             existingPlayers.set(player.character, player);
         });
-
+        
         // Comparar jugadores por nombre, posición de ranking y puntuación de poder
         for (let i = 0; i < comparisonLimit; i++) {
             const scrapedPlayer = scrapedData[i];
@@ -224,6 +225,60 @@ async function shouldContinueScraping(scrapedData, regionName = null, serverName
 }
 
 /**
+ * Verifica si el sitio permite el scraping según robots.txt
+ * @returns {Promise<boolean>} - True si está permitido, false si no
+ */
+async function checkRobotsTxt() {
+    try {
+        // Si no se debe respetar robots.txt, siempre retornar true
+        if (!SCRAPER_BEHAVIOR.RESPECT_ROBOTS_TXT) {
+            logger.warn('No se está respetando robots.txt según configuración', 'Scraper');
+            return true;
+        }
+        
+        const response = await axios.get(URLS.ROBOTS_TXT, { timeout: 5000 });
+        const robotsTxt = response.data;
+        
+        // Verificar si hay reglas para User-agent: * o para nuestro User-Agent específico
+        const userAgentPattern = HEADERS['User-Agent'].includes('Mozilla') ? 'Mozilla' : '*';
+        const lines = robotsTxt.split('\n');
+        
+        let applyingRules = false;
+        let allowedToScrape = true;
+        
+        for (const line of lines) {
+            const trimmedLine = line.trim().toLowerCase();
+            
+            // Identificar bloques de reglas para nuestro User-Agent
+            if (trimmedLine.startsWith('user-agent:')) {
+                const agent = trimmedLine.split(':')[1].trim();
+                applyingRules = (agent === '*' || agent.includes(userAgentPattern.toLowerCase()));
+            } 
+            // Aplicar reglas de Disallow solo si estamos en un bloque relevante
+            else if (applyingRules && trimmedLine.startsWith('disallow:')) {
+                const path = trimmedLine.split(':')[1].trim();
+                // Verificar si la ruta de ranking está prohibida
+                if (path === '/' || URLS.RANKING_BASE.includes(path)) {
+                    allowedToScrape = false;
+                    break;
+                }
+            }
+        }
+        
+        if (allowedToScrape) {
+            logger.info('El scraping está permitido según robots.txt', 'Scraper');
+        } else {
+            logger.warn('El scraping NO está permitido según robots.txt', 'Scraper');
+        }
+        
+        return allowedToScrape;
+    } catch (error) {
+        logger.warn(`No se pudo verificar robots.txt: ${error.message}. Asumiendo que está permitido.`, 'Scraper');
+        return true;
+    }
+}
+
+/**
  * Obtiene y parsea los datos del ranking de MIR4 para un servidor específico
  * @param {string} regionName - Nombre de la región (ej: ASIA, IMENA)
  * @param {string} serverName - Nombre del servidor (ej: ASIA011, IMENA011)
@@ -235,6 +290,10 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
     let browser = null;
     
     try {
+        // Registrar inicio del scraping para este servidor
+        logger.startScraperRun(`${regionName}>${serverName}`);
+        logger.metric(`scraper_start_${regionName}_${serverName}`, 1);
+        
         // Clave para el caché específico de este servidor
         const cacheKey = `${regionName}_${serverName}`;
         
@@ -243,7 +302,18 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
             const cachedData = getServerCache(cacheKey);
             if (cachedData) {
                 logger.scraper(`Usando datos en caché para ${regionName} > ${serverName} (${cachedData.length} jugadores)`);
+                logger.endScraperRun(true, `Usado caché para ${regionName}>${serverName} (${cachedData.length} jugadores)`);
+                logger.metric(`scraper_cache_hit_${regionName}_${serverName}`, 1);
                 return cachedData;
+            }
+        }
+        
+        // Verificar robots.txt si está configurado para respetarlo
+        if (SCRAPER_BEHAVIOR.RESPECT_ROBOTS_TXT) {
+            const allowedToScrape = await checkRobotsTxt();
+            if (!allowedToScrape) {
+                logger.alert(`El scraping no está permitido según robots.txt para ${regionName} > ${serverName}`, 'Scraper');
+                throw new Error(`El scraping no está permitido según robots.txt`);
             }
         }
         
@@ -255,17 +325,8 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
         
         // Iniciar el navegador
         const browser = await puppeteer.launch({
-            headless: CONFIG.BROWSER_HEADLESS,
-            args: [
-                '--no-sandbox', 
-                '--disable-setuid-sandbox', 
-                '--disable-web-security',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--single-process'
-            ],
+            headless: SCRAPER_BEHAVIOR.BROWSER_HEADLESS,
+            args: SCRAPER_BEHAVIOR.BROWSER_ARGS,
             timeout: 60000 // 60 segundos para iniciar el navegador
         });
         
@@ -293,7 +354,7 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
             // Aceptar cookies si aparece el diálogo
             try {
                 logger.scraper('Comprobando si hay diálogo de cookies...');
-                const cookieButton = await page.$('button.btn_accept_cookies');
+                const cookieButton = await page.$(SELECTORS.COOKIE_ACCEPT_BUTTON);
                 if (cookieButton) {
                     await cookieButton.click();
                     logger.scraper('Aceptadas las cookies');
@@ -321,6 +382,7 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
                     await browser.close();
                     browser = null;
                     
+                    // Si no hay datos en caché, usar los de la base de datos
                     const existingData = getServerCache(cacheKey);
                     if (existingData) {
                         // Añadir información de región/servidor a cada jugador
@@ -352,7 +414,7 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
                     // Esperar a que el botón sea visible y esté habilitado
                     await page.waitForSelector(CONFIG.LOAD_MORE_BUTTON_SELECTOR, { 
                         visible: true,
-                        timeout: 5000
+                        timeout: SCRAPER_BEHAVIOR.WAIT_FOR_SELECTOR_MS
                     }).catch(err => {
                         logger.debug(`Botón no encontrado: ${err.message}`, 'Scraper');
                         return null;
@@ -376,7 +438,7 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
                     logger.scraper(`Texto del botón: "${buttonText}"`);
                     
                     // Contar elementos antes del clic
-                    const countBefore = await page.$$eval('tr.list_article', rows => rows.length)
+                    const countBefore = await page.$$eval(SELECTORS.RANKING_ROW, rows => rows.length)
                         .catch(err => {
                             logger.debug(`Error al contar elementos: ${err.message}`, 'Scraper');
                             return 0;
@@ -393,12 +455,13 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
                     logger.scraper(`Esperando a que se carguen nuevos datos...`);
                     try {
                         await page.waitForFunction(
-                            (previousCount) => {
-                                const currentCount = document.querySelectorAll('tr.list_article').length;
+                            (previousCount, selector) => {
+                                const currentCount = document.querySelectorAll(selector).length;
                                 return currentCount > previousCount;
                             },
-                            { timeout: 10000 },
-                            countBefore
+                            { timeout: SCRAPER_BEHAVIOR.WAIT_FOR_NAVIGATION_MS },
+                            countBefore,
+                            SELECTORS.RANKING_ROW
                         );
                     } catch (waitError) {
                         logger.error(`Error al esperar nuevos datos: ${waitError.message}`, 'Scraper');
@@ -413,10 +476,10 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
                     }
                     
                     // Esperar un tiempo adicional para asegurar que todo se haya cargado
-                    await new Promise(resolve => setTimeout(resolve, CONFIG.WAIT_BETWEEN_CLICKS_MS));
+                    await new Promise(resolve => setTimeout(resolve, SCRAPER_BEHAVIOR.WAIT_BETWEEN_CLICKS_MS));
                     
                     // Contar elementos después del clic
-                    const countAfter = await page.$$eval('tr.list_article', rows => rows.length)
+                    const countAfter = await page.$$eval(SELECTORS.RANKING_ROW, rows => rows.length)
                         .catch(err => {
                             logger.debug(`Error al contar elementos después: ${err.message}`, 'Scraper');
                             return 0;
@@ -441,6 +504,10 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
                     
                     // Guardar el HTML de cada página para debugging
                     await saveScrapedHtml(currentPageHtml, `${htmlFileName}_page_${pagesLoaded}`);
+                    
+                    // Registrar métrica de progreso
+                    logger.metric(`scraper_page_loaded_${regionName}_${serverName}`, pagesLoaded);
+
                 } catch (btnError) {
                     logger.error(`Error al cargar más páginas: ${btnError}`, 'Scraper');
                     
@@ -490,6 +557,10 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
                 serverName
             }));
             
+            // Registrar éxito
+            logger.endScraperRun(true, `${regionName}>${serverName}: ${allRankings.length} jugadores en ${pagesLoaded} páginas`);
+            logger.metric(`scraper_success_${regionName}_${serverName}`, allRankings.length);
+            
             return allRankings;
         } catch (pageError) {
             logger.error(`Error en la navegación para ${regionName} > ${serverName}: ${pageError}`, 'Scraper');
@@ -510,15 +581,19 @@ async function fetchServerRankingData(regionName, serverName, forceRefresh = fal
         
         logger.error(`Error fetchServerRankingData para ${regionName} > ${serverName}: ${error.message}`, 'Scraper');
         
+        // Registrar fallo
+        logger.endScraperRun(false, `${regionName}>${serverName}: ${error.message}`);
+        logger.metric(`scraper_error_${regionName}_${serverName}`, 1);
+        
         // Implementar reintentos para errores relacionados con el cierre de la sesión
-        const MAX_RETRIES = 3;
+        const MAX_RETRIES = SCRAPER_BEHAVIOR.MAX_RETRIES;
         if (retryCount < MAX_RETRIES && (
             error.message.includes('Target closed') || 
             error.message.includes('Session closed') || 
             error.message.includes('frame got detached')
         )) {
             // Esperar un poco antes de reintentar
-            const waitTime = (retryCount + 1) * 2000; // Espera incremental: 2s, 4s, 6s
+            const waitTime = (retryCount + 1) * SCRAPER_BEHAVIOR.RETRY_DELAY_MS; // Espera incremental
             logger.warn(`Reintentando en ${waitTime/1000}s (intento ${retryCount + 1} de ${MAX_RETRIES})...`, 'Scraper');
             await new Promise(resolve => setTimeout(resolve, waitTime));
             
@@ -539,12 +614,27 @@ async function fetchRankingData(forceRefresh = false, retryCount = 0) {
     let browser = null;
     
     try {
+        // Registrar inicio del scraping
+        logger.startScraperRun();
+        logger.metric('scraper_start_global', 1);
+        
         // Verificar si tenemos datos en caché y no se forzó refresco
         if (!forceRefresh) {
             const cachedData = getMainCache();
             if (cachedData) {
                 logger.scraper(`Usando datos en caché (${cachedData.length} jugadores)`);
+                logger.endScraperRun(true, `Usado caché global (${cachedData.length} jugadores)`);
+                logger.metric('scraper_cache_hit', cachedData.length);
                 return cachedData;
+            }
+        }
+        
+        // Verificar robots.txt si está configurado para respetarlo
+        if (SCRAPER_BEHAVIOR.RESPECT_ROBOTS_TXT) {
+            const allowedToScrape = await checkRobotsTxt();
+            if (!allowedToScrape) {
+                logger.alert('El scraping no está permitido según robots.txt', 'Scraper');
+                throw new Error('El scraping no está permitido según robots.txt');
             }
         }
         
@@ -552,17 +642,8 @@ async function fetchRankingData(forceRefresh = false, retryCount = 0) {
         
         // Iniciar el navegador
         const browser = await puppeteer.launch({
-            headless: CONFIG.BROWSER_HEADLESS,
-            args: [
-                '--no-sandbox', 
-                '--disable-setuid-sandbox', 
-                '--disable-web-security',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--single-process'
-            ],
+            headless: SCRAPER_BEHAVIOR.BROWSER_HEADLESS,
+            args: SCRAPER_BEHAVIOR.BROWSER_ARGS,
             timeout: 60000 // 60 segundos para iniciar el navegador
         });
         
@@ -590,7 +671,7 @@ async function fetchRankingData(forceRefresh = false, retryCount = 0) {
             // Aceptar cookies si aparece el diálogo
             try {
                 logger.scraper('Comprobando si hay diálogo de cookies...');
-                const cookieButton = await page.$('button.btn_accept_cookies');
+                const cookieButton = await page.$(SELECTORS.COOKIE_ACCEPT_BUTTON);
                 if (cookieButton) {
                     await cookieButton.click();
                     logger.scraper('Aceptadas las cookies');
@@ -630,7 +711,7 @@ async function fetchRankingData(forceRefresh = false, retryCount = 0) {
                     // Esperar a que el botón sea visible y esté habilitado
                     await page.waitForSelector(CONFIG.LOAD_MORE_BUTTON_SELECTOR, { 
                         visible: true,
-                        timeout: 5000
+                        timeout: SCRAPER_BEHAVIOR.WAIT_FOR_SELECTOR_MS
                     }).catch(err => {
                         logger.debug(`Botón no encontrado: ${err.message}`, 'Scraper');
                         return null;
@@ -654,7 +735,7 @@ async function fetchRankingData(forceRefresh = false, retryCount = 0) {
                     logger.scraper(`Texto del botón: "${buttonText}"`);
                     
                     // Contar elementos antes del clic
-                    const countBefore = await page.$$eval('tr.list_article', rows => rows.length)
+                    const countBefore = await page.$$eval(SELECTORS.RANKING_ROW, rows => rows.length)
                         .catch(err => {
                             logger.debug(`Error al contar elementos: ${err.message}`, 'Scraper');
                             return 0;
@@ -671,12 +752,13 @@ async function fetchRankingData(forceRefresh = false, retryCount = 0) {
                     logger.scraper(`Esperando a que se carguen nuevos datos...`);
                     try {
                         await page.waitForFunction(
-                            (previousCount) => {
-                                const currentCount = document.querySelectorAll('tr.list_article').length;
+                            (previousCount, selector) => {
+                                const currentCount = document.querySelectorAll(selector).length;
                                 return currentCount > previousCount;
                             },
-                            { timeout: 10000 },
-                            countBefore
+                            { timeout: SCRAPER_BEHAVIOR.WAIT_FOR_NAVIGATION_MS },
+                            countBefore,
+                            SELECTORS.RANKING_ROW
                         );
                     } catch (waitError) {
                         logger.error(`Error al esperar nuevos datos: ${waitError.message}`, 'Scraper');
@@ -694,7 +776,7 @@ async function fetchRankingData(forceRefresh = false, retryCount = 0) {
                     await new Promise(resolve => setTimeout(resolve, CONFIG.WAIT_BETWEEN_CLICKS_MS));
                     
                     // Contar elementos después del clic
-                    const countAfter = await page.$$eval('tr.list_article', rows => rows.length)
+                    const countAfter = await page.$$eval(SELECTORS.RANKING_ROW, rows => rows.length)
                         .catch(err => {
                             logger.debug(`Error al contar elementos después: ${err.message}`, 'Scraper');
                             return 0;
@@ -719,6 +801,10 @@ async function fetchRankingData(forceRefresh = false, retryCount = 0) {
                     
                     // Guardar el HTML de cada página para debugging
                     await saveScrapedHtml(currentPageHtml, `ranking_page_${pagesLoaded}`);
+                    
+                    // Registrar métrica de progreso
+                    logger.metric('scraper_page_loaded', pagesLoaded);
+                    
                 } catch (btnError) {
                     logger.error(`Error al cargar más páginas: ${btnError}`, 'Scraper');
                     
@@ -761,6 +847,10 @@ async function fetchRankingData(forceRefresh = false, retryCount = 0) {
             // Guardar los datos en caché para futuras consultas
             setMainCache(allRankings);
             
+            // Registrar éxito
+            logger.endScraperRun(true, `Global: ${allRankings.length} jugadores en ${pagesLoaded} páginas`);
+            logger.metric('scraper_success', allRankings.length);
+            
             return allRankings;
         } catch (pageError) {
             logger.error(`Error en la navegación: ${pageError}`, 'Scraper');
@@ -784,15 +874,19 @@ async function fetchRankingData(forceRefresh = false, retryCount = 0) {
             logger.error(`Response status: ${error.response.status}`, 'Scraper');
         }
         
+        // Registrar fallo
+        logger.endScraperRun(false, `Global: ${error.message}`);
+        logger.metric('scraper_error', 1);
+        
         // Implementar reintentos para errores relacionados con el cierre de la sesión
-        const MAX_RETRIES = 3;
+        const MAX_RETRIES = SCRAPER_BEHAVIOR.MAX_RETRIES;
         if (retryCount < MAX_RETRIES && (
             error.message.includes('Target closed') || 
             error.message.includes('Session closed') || 
             error.message.includes('frame got detached')
         )) {
             // Esperar un poco antes de reintentar
-            const waitTime = (retryCount + 1) * 2000; // Espera incremental: 2s, 4s, 6s
+            const waitTime = (retryCount + 1) * SCRAPER_BEHAVIOR.RETRY_DELAY_MS;
             logger.warn(`Reintentando en ${waitTime/1000}s (intento ${retryCount + 1} de ${MAX_RETRIES})...`, 'Scraper');
             await new Promise(resolve => setTimeout(resolve, waitTime));
             
@@ -807,5 +901,6 @@ module.exports = {
     fetchRankingData,
     fetchServerRankingData,
     parseRankingHtml,
-    buildServerUrl
+    buildServerUrl,
+    checkRobotsTxt
 };

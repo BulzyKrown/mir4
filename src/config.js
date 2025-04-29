@@ -2,8 +2,9 @@
  * Archivo de configuración para la API de rankings de MIR4
  */
 
-// Cargar variables de entorno
+// Cargar variables de entorno y módulo de secretos
 require('dotenv').config();
+const { getSecret } = require('./secrets');
 
 // Mapa de URLs de imágenes a clases de personajes
 const CHARACTER_CLASSES = {
@@ -298,39 +299,96 @@ const SERVER_REGIONS = {
     }
 };
 
-// Headers para la petición
+// Headers para la petición (configurables para adaptarse a cambios en la seguridad del sitio)
 const HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Cache-Control': 'no-cache',
-    'Pragma': 'no-cache'
+    'User-Agent': getSecret('SCRAPER_USER_AGENT', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'),
+    'Accept': getSecret('SCRAPER_ACCEPT', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'),
+    'Accept-Language': getSecret('SCRAPER_ACCEPT_LANGUAGE', 'en-US,en;q=0.9'),
+    'Cache-Control': getSecret('SCRAPER_CACHE_CONTROL', 'no-cache'),
+    'Pragma': getSecret('SCRAPER_PRAGMA', 'no-cache')
+};
+
+// Selectores CSS/XPath para el scraping (extraídos a configuración para facilitar su actualización)
+const SELECTORS = {
+    // Selectores para la lista de rankings
+    RANKING_ROW: 'tr.list_article',
+    RANK_NUMBER: '.rank_num .num',
+    CHARACTER_NAME: '.user_name',
+    CHARACTER_ICON: '.user_icon',
+    SERVER_NAME: 'td:nth-child(3) span',
+    CLAN_NAME: 'td:nth-child(4) span',
+    POWER_SCORE: 'td.text_right span',
+    
+    // Selectores para la navegación y acciones
+    LOAD_MORE_BUTTON: '#btn_morelist',
+    COOKIE_ACCEPT_BUTTON: 'button.btn_accept_cookies',
+    
+    // Patrones para extraer información de atributos
+    STYLE_BACKGROUND_REGEX: /url\(['"]?(.*?)['"]?\)/,
+    
+    // Selectores para filtros y ordenación
+    FILTER_DROPDOWN: '.filter_box select',
+    SORT_DROPDOWN: '.sort_box select',
+    
+    // Mensajes de error o estado en la página
+    ERROR_MESSAGE: '.error_message',
+    NO_RESULTS_MESSAGE: '.no_result'
+};
+
+// Tiempos de espera y configuraciones de comportamiento para el scraper
+const SCRAPER_BEHAVIOR = {
+    WAIT_BETWEEN_CLICKS_MS: parseInt(getSecret('SCRAPER_WAIT_BETWEEN_CLICKS', '2000')),
+    WAIT_FOR_NAVIGATION_MS: parseInt(getSecret('SCRAPER_WAIT_FOR_NAVIGATION', '10000')),
+    WAIT_FOR_SELECTOR_MS: parseInt(getSecret('SCRAPER_WAIT_FOR_SELECTOR', '5000')),
+    MAX_PAGES_TO_SCRAPE: parseInt(getSecret('SCRAPER_MAX_PAGES', '10')),
+    RETRY_DELAY_MS: parseInt(getSecret('SCRAPER_RETRY_DELAY', '5000')),
+    MAX_RETRIES: parseInt(getSecret('SCRAPER_MAX_RETRIES', '3')),
+    RESPECT_ROBOTS_TXT: getSecret('SCRAPER_RESPECT_ROBOTS_TXT', 'true') === 'true',
+    BROWSER_HEADLESS: getSecret('SCRAPER_HEADLESS', 'true') === 'true',
+    BROWSER_ARGS: [
+        '--no-sandbox', 
+        '--disable-setuid-sandbox', 
+        '--disable-web-security',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process'
+    ]
+};
+
+// URLs y endpoints
+const URLS = {
+    RANKING_BASE: getSecret('RANKING_URL', 'https://forum.mir4global.com/rank'),
+    RANKING_POWER: getSecret('RANKING_POWER_URL', 'https://forum.mir4global.com/rank?ranktype=1'),
+    RANKING_CLAN: getSecret('RANKING_CLAN_URL', 'https://forum.mir4global.com/rank?ranktype=2'),
+    ROBOTS_TXT: 'https://forum.mir4global.com/robots.txt'
 };
 
 // Configuraciones generales
 const CONFIG = {
-    PORT: process.env.PORT || 3000,
-    RANKING_URL: 'https://forum.mir4global.com/rank?ranktype=1',
-    MAX_FILE_AGE_MS: 1 * 60 * 1000, // 1 minuto en milisegundos
-    CLEANUP_CRON: '*/5 * * * *', // Cada 5 minutos
-    DATA_DIR: 'data', // Directorio para archivos de datos
-    SCRAPED_PAGES_DIR: 'scraped_pages', // Directorio para páginas scrapeadas
-    MAX_PAGES_TO_SCRAPE: 10, // Máximo número de páginas a scrapear (10 x 100 = 1000 jugadores)
-    LOAD_MORE_BUTTON_SELECTOR: '#btn_morelist', // Selector correcto del botón "+ To see more (100)"
-    WAIT_BETWEEN_CLICKS_MS: 2000, // Tiempo de espera entre clics en el botón "Ver más"
-    BROWSER_HEADLESS: true, // Ejecutar el navegador en modo headless
-    SERVER_CACHE_TTL: 12 * 60 * 60 * 1000, // 12 horas en milisegundos para el caché de servidores
-    PREFETCH_CRON: '0 */12 * * *', // Cada 12 horas (a las 00:00 y 12:00)
+    PORT: parseInt(getSecret('PORT', '3000')),
+    RANKING_URL: URLS.RANKING_POWER,
+    MAX_FILE_AGE_MS: parseInt(getSecret('MAX_FILE_AGE_MS', '60000')), // 1 minuto en milisegundos
+    CLEANUP_CRON: getSecret('CLEANUP_CRON', '*/5 * * * *'), // Cada 5 minutos
+    DATA_DIR: getSecret('DATA_DIR', 'data'), // Directorio para archivos de datos
+    SCRAPED_PAGES_DIR: getSecret('SCRAPED_PAGES_DIR', 'scraped_pages'), // Directorio para páginas scrapeadas
+    MAX_PAGES_TO_SCRAPE: SCRAPER_BEHAVIOR.MAX_PAGES_TO_SCRAPE,
+    LOAD_MORE_BUTTON_SELECTOR: SELECTORS.LOAD_MORE_BUTTON,
+    WAIT_BETWEEN_CLICKS_MS: SCRAPER_BEHAVIOR.WAIT_BETWEEN_CLICKS_MS,
+    BROWSER_HEADLESS: SCRAPER_BEHAVIOR.BROWSER_HEADLESS,
+    SERVER_CACHE_TTL: parseInt(getSecret('SERVER_CACHE_TTL', '43200000')), // 12 horas en milisegundos
+    PREFETCH_CRON: getSecret('PREFETCH_CRON', '0 */12 * * *'), // Cada 12 horas
     
-    // Configuración de MySQL usando variables de entorno
+    // Configuración de MySQL usando el módulo de secretos
     MYSQL: {
-        host: process.env.MYSQL_HOST || 'localhost',
-        port: parseInt(process.env.MYSQL_PORT || '3306'),
-        user: process.env.MYSQL_USER || 'root',
-        password: process.env.MYSQL_PASSWORD || '',
-        database: process.env.MYSQL_DATABASE || 'mir4rankings',
+        host: getSecret('DB_HOST', 'localhost'),
+        port: parseInt(getSecret('DB_PORT', '3306')),
+        user: getSecret('DB_USER', 'root'),
+        password: getSecret('DB_PASSWORD', ''),
+        database: getSecret('DB_NAME', 'mir4rankings'),
         waitForConnections: true,
-        connectionLimit: parseInt(process.env.MYSQL_CONNECTION_LIMIT || '10'),
+        connectionLimit: parseInt(getSecret('DB_CONNECTION_LIMIT', '10')),
         queueLimit: 0
     }
 };
@@ -340,5 +398,8 @@ module.exports = {
     HEADERS,
     CONFIG,
     SERVER_REGIONS,
-    generateServerId
+    generateServerId,
+    SELECTORS,
+    SCRAPER_BEHAVIOR,
+    URLS
 };
