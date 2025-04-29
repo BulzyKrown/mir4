@@ -10,6 +10,12 @@ const logger = require('./logger');
 
 const router = express.Router();
 
+// Importar middleware de Rate Limiting
+const { rateLimiterMiddleware } = require('./rateLimit');
+
+// Aplicar middleware de Rate Limiting a todas las rutas
+router.use(rateLimiterMiddleware);
+
 // Endpoint para la ruta raíz con información básica
 router.get('/', (req, res) => {
     try {
