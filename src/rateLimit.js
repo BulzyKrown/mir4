@@ -1,190 +1,188 @@
 /**
- * Módulo para implementar rate limiting en la API
- * Previene abuso y uso excesivo
+ * Módulo para gestionar límites de tasa (rate limiting) para la API
+ * Protege contra uso excesivo y abuse de la API
  */
 
 const logger = require('./logger');
 
-/**
- * Clase para gestionar rate limiting basado en tokens bucket
- */
-class TokenBucket {
-    /**
-     * @param {number} capacity - Número máximo de tokens
-     * @param {number} fillPerSecond - Tokens que se regeneran por segundo
-     */
-    constructor(capacity, fillPerSecond) {
-        this.capacity = capacity;
-        this.fillPerSecond = fillPerSecond;
-        this.tokens = capacity;
-        this.lastFilled = Date.now();
-    }
-
-    /**
-     * Obtiene tokens del bucket
-     * @param {number} count - Cantidad de tokens a consumir
-     * @returns {boolean} - true si hay suficientes tokens, false en caso contrario
-     */
-    getTokens(count) {
-        this.refill();
-        if (this.tokens >= count) {
-            this.tokens -= count;
-            return true;
-        }
-        return false;
-    }
-
-    /**
-     * Rellena tokens según el tiempo transcurrido
-     */
-    refill() {
-        const now = Date.now();
-        const deltaSeconds = (now - this.lastFilled) / 1000;
-        
-        // Calcular nuevos tokens a añadir
-        const newTokens = deltaSeconds * this.fillPerSecond;
-        
-        // Si hay nuevos tokens que añadir
-        if (newTokens > 0) {
-            this.tokens = Math.min(this.capacity, this.tokens + newTokens);
-            this.lastFilled = now;
+// Configuración de límites por defecto
+const DEFAULT_LIMITS = {
+    // Límite general para todas las rutas
+    global: {
+        windowMs: 60 * 1000,         // 1 minuto
+        maxRequests: 60,             // 60 solicitudes por minuto
+        message: 'Demasiadas solicitudes, por favor intente nuevamente en un minuto.'
+    },
+    // Límite para rutas específicas
+    routes: {
+        '/api/refresh': {
+            windowMs: 5 * 60 * 1000,  // 5 minutos
+            maxRequests: 1,           // 1 solicitud cada 5 minutos
+            message: 'Operación de actualización limitada a una vez cada 5 minutos.'
+        },
+        '/api/cache/clear': {
+            windowMs: 60 * 1000,      // 1 minuto
+            maxRequests: 2,           // 2 solicitudes por minuto
+            message: 'Operación de limpieza de caché limitada a 2 veces por minuto.'
         }
     }
-}
-
-// Map para almacenar los buckets por IP
-const ipRateLimiters = new Map();
-const pathRateLimiters = new Map();
-
-// Configuración por defecto para rate limiting
-const DEFAULT_CONFIG = {
-    tokensPerSecond: 5,    // 5 solicitudes por segundo en promedio
-    bucketSize: 10,        // Máximo 10 solicitudes en ráfaga
-    ipTokenCost: 1,        // Coste de una solicitud normal por IP
-    pathTokenCost: 1,      // Coste de una solicitud por ruta
-    costPenaltyFactor: 2,  // Factor de coste para penalizar abuso
 };
 
+// Almacenamiento de solicitudes por IP
+const requestStore = new Map();
+
 /**
- * Aplica rate limiting a una solicitud
- * @param {Object} req - Request de Express 
- * @param {Object} res - Response de Express
- * @param {Function} next - Función para continuar al siguiente middleware
+ * Limpia entradas antiguas del almacén de solicitudes
  */
-function rateLimiterMiddleware(req, res, next) {
-    const ip = req.ip || req.connection.remoteAddress || 'unknown';
-    const path = req.path;
+function cleanupStore() {
+    const now = Date.now();
     
-    // Saltar rate limiting para IPs locales/de desarrollo
-    if (ip === '127.0.0.1' || ip === '::1' || ip === 'localhost' || ip.includes('192.168.') || ip.includes('::ffff:127.0.0.1')) {
-        return next();
-    }
-
-    // Obtener o crear limitador para esta IP
-    if (!ipRateLimiters.has(ip)) {
-        ipRateLimiters.set(ip, new TokenBucket(
-            DEFAULT_CONFIG.bucketSize,
-            DEFAULT_CONFIG.tokensPerSecond
-        ));
-    }
-
-    // Obtener o crear limitador para esta ruta
-    const routeKey = `${req.method}:${path}`;
-    if (!pathRateLimiters.has(routeKey)) {
-        pathRateLimiters.set(routeKey, new TokenBucket(
-            DEFAULT_CONFIG.bucketSize * 5, // Mayor capacidad para rutas específicas
-            DEFAULT_CONFIG.tokensPerSecond * 2 // Más tokens por segundo para rutas específicas
-        ));
-    }
-
-    // Calcular coste de esta solicitud
-    let requestCost = DEFAULT_CONFIG.ipTokenCost;
-    
-    // Coste adicional para rutas que acceden a datos completos
-    if (path.includes('/api/rankings') || path.includes('/api/details')) {
-        requestCost = DEFAULT_CONFIG.ipTokenCost * 2;
-    }
-    
-    // Coste adicional para peticiones que fuerzan refresco
-    if (req.query.forceRefresh === 'true' || req.query.force === 'true') {
-        requestCost = requestCost * DEFAULT_CONFIG.costPenaltyFactor;
-    }
-    
-    // Verificar si la IP tiene suficientes tokens
-    const ipLimiter = ipRateLimiters.get(ip);
-    const pathLimiter = pathRateLimiters.get(routeKey);
-    
-    const ipAllowed = ipLimiter.getTokens(requestCost);
-    const pathAllowed = pathLimiter.getTokens(DEFAULT_CONFIG.pathTokenCost);
-    
-    // Si ambos limitadores permiten la solicitud
-    if (ipAllowed && pathAllowed) {
-        // Establecer cabeceras informativas
-        res.setHeader('X-RateLimit-Limit', DEFAULT_CONFIG.bucketSize);
-        res.setHeader('X-RateLimit-Remaining', Math.floor(ipLimiter.tokens));
-        res.setHeader('X-RateLimit-Reset', Math.ceil(
-            (DEFAULT_CONFIG.bucketSize - ipLimiter.tokens) / DEFAULT_CONFIG.tokensPerSecond
-        ));
+    requestStore.forEach((data, ip) => {
+        // Limpiar contadores obsoletos
+        Object.keys(data.counters).forEach(route => {
+            const routeData = data.counters[route];
+            
+            // Filtrar solo las solicitudes dentro de la ventana de tiempo activa
+            const activeRequests = routeData.requests.filter(timestamp => {
+                const windowMs = getRouteLimit(route).windowMs;
+                return now - timestamp < windowMs;
+            });
+            
+            if (activeRequests.length === 0) {
+                // Eliminar el contador de esta ruta si no hay solicitudes activas
+                delete data.counters[route];
+            } else {
+                // Actualizar la lista de solicitudes activas
+                routeData.requests = activeRequests;
+            }
+        });
         
-        return next();
-    }
-    
-    // Si se alcanzó el límite, registrar información
-    logger.warn(`Rate limit alcanzado para IP ${ip} en ${routeKey} (IP tokens: ${ipLimiter.tokens.toFixed(2)}, Path tokens: ${pathLimiter.tokens.toFixed(2)})`, 'API');
-    
-    // Establecer cabeceras de respuesta para rate limiting
-    res.status(429).setHeader('Retry-After', Math.ceil(
-        (requestCost - ipLimiter.tokens) / DEFAULT_CONFIG.tokensPerSecond
-    ));
-    
-    return res.json({
-        error: 'Demasiadas solicitudes, por favor inténtalo más tarde',
-        retryAfter: Math.ceil((requestCost - ipLimiter.tokens) / DEFAULT_CONFIG.tokensPerSecond)
+        // Si no hay contadores para esta IP, eliminarla del almacén
+        if (Object.keys(data.counters).length === 0) {
+            requestStore.delete(ip);
+        }
     });
 }
 
 /**
- * Limpia los limitadores antiguos (ejecutar periódicamente)
- * @param {number} maxAgeMs - Tiempo máximo sin uso (en ms) antes de eliminar un limitador
+ * Obtiene la configuración de límites para una ruta específica
+ * @param {string} route - Ruta de la solicitud
+ * @returns {Object} - Configuración de límites
  */
-function cleanupRateLimiters(maxAgeMs = 3600000) { // 1 hora por defecto
-    const now = Date.now();
-    
-    // Limpiar limitadores por IP
-    for (const [ip, limiter] of ipRateLimiters.entries()) {
-        if (now - limiter.lastFilled > maxAgeMs) {
-            ipRateLimiters.delete(ip);
+function getRouteLimit(route) {
+    // Buscar primero una configuración específica para la ruta
+    for (const [pattern, config] of Object.entries(DEFAULT_LIMITS.routes)) {
+        // Coincidencia exacta de ruta
+        if (route === pattern) {
+            return config;
         }
+        
+        // En el futuro podemos agregar soporte para patrones más complejos con expresiones regulares
     }
     
-    // Limpiar limitadores por ruta
-    for (const [path, limiter] of pathRateLimiters.entries()) {
-        if (now - limiter.lastFilled > maxAgeMs) {
-            pathRateLimiters.delete(path);
-        }
-    }
-    
-    logger.debug(`Limpieza de rate limiters: ${ipRateLimiters.size} IPs, ${pathRateLimiters.size} rutas`, 'API');
+    // Si no hay configuración específica, usar la configuración global
+    return DEFAULT_LIMITS.global;
 }
 
 /**
- * Configura la limpieza periódica de rate limiters
- * @param {number} intervalMs - Intervalo entre limpiezas en ms
+ * Verifica si una solicitud debe ser limitada
+ * @param {string} ip - Dirección IP del cliente
+ * @param {string} route - Ruta solicitada
+ * @returns {Object} - Resultado de la verificación {limited, message, resetTime}
  */
-function setupCleanupInterval(intervalMs = 1800000) { // 30 minutos por defecto
-    setInterval(() => {
-        cleanupRateLimiters();
-    }, intervalMs);
+function shouldLimit(ip, route) {
+    const now = Date.now();
+    const routeLimit = getRouteLimit(route);
     
-    logger.info(`Limpieza automática de rate limiters configurada cada ${intervalMs/60000} minutos`, 'API');
+    // Inicializar datos de la IP si no existen
+    if (!requestStore.has(ip)) {
+        requestStore.set(ip, {
+            counters: {},
+            lastRequest: now
+        });
+    }
+    
+    const ipData = requestStore.get(ip);
+    
+    // Inicializar contador de ruta si no existe
+    if (!ipData.counters[route]) {
+        ipData.counters[route] = {
+            requests: []
+        };
+    }
+    
+    const routeData = ipData.counters[route];
+    
+    // Filtrar las solicitudes dentro de la ventana de tiempo actual
+    const windowMs = routeLimit.windowMs;
+    routeData.requests = routeData.requests.filter(timestamp => now - timestamp < windowMs);
+    
+    // Verificar si se ha excedido el límite
+    const requestsCount = routeData.requests.length;
+    const limited = requestsCount >= routeLimit.maxRequests;
+    
+    // Si no está limitado, registrar la solicitud actual
+    if (!limited) {
+        routeData.requests.push(now);
+        ipData.lastRequest = now;
+    }
+    
+    // Calcular tiempo de reseteo
+    let resetTime = 0;
+    if (routeData.requests.length > 0) {
+        // El tiempo de reseteo es cuando expire la solicitud más antigua
+        resetTime = routeData.requests[0] + windowMs;
+    }
+    
+    return {
+        limited,
+        message: routeLimit.message,
+        resetTime,
+        remaining: Math.max(0, routeLimit.maxRequests - requestsCount),
+        limit: routeLimit.maxRequests,
+        windowMs
+    };
 }
 
-// Iniciar limpieza periódica
-setupCleanupInterval();
+/**
+ * Middleware Express para limitar tasas de solicitudes
+ * @returns {Function} - Middleware Express
+ */
+function createRateLimiter() {
+    // Ejecutar limpieza del almacén cada 5 minutos
+    setInterval(cleanupStore, 5 * 60 * 1000);
+    
+    return function rateLimiter(req, res, next) {
+        const ip = req.ip || req.connection.remoteAddress;
+        const route = req.originalUrl || req.url;
+        
+        const result = shouldLimit(ip, route);
+        
+        // Añadir encabezados de límite de tasa
+        res.setHeader('X-RateLimit-Limit', result.limit);
+        res.setHeader('X-RateLimit-Remaining', result.remaining);
+        res.setHeader('X-RateLimit-Reset', Math.ceil(result.resetTime / 1000));
+        
+        if (result.limited) {
+            // Registrar evento de limitación
+            logger.warn(`Rate limit alcanzado para ${ip} en ruta ${route}`, 'RateLimit');
+            logger.metric('rate_limit_exceeded', 1, 'RateLimit');
+            
+            // Enviar respuesta de error
+            res.status(429).json({
+                error: 'Too Many Requests',
+                message: result.message,
+                retryAfter: Math.ceil((result.resetTime - Date.now()) / 1000)
+            });
+        } else {
+            next(); // Continuar con la siguiente función middleware
+        }
+    };
+}
 
 module.exports = {
-    rateLimiterMiddleware,
-    cleanupRateLimiters,
-    DEFAULT_CONFIG,
-    TokenBucket
+    createRateLimiter,
+    shouldLimit,
+    getRouteLimit,
+    cleanupStore
 };

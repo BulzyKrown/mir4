@@ -83,17 +83,23 @@ function isRetryableError(error, config = DEFAULT_RETRY_CONFIG) {
  * @returns {number} - Tiempo de retraso en milisegundos
  */
 function calculateBackoff(attemptNumber, config = DEFAULT_RETRY_CONFIG) {
-    // Backoff exponencial: initialDelay * (factor ^ attemptNumber)
-    const exponentialDelay = config.initialDelayMs * Math.pow(config.factor, attemptNumber - 1);
+    // Aplicar backoff exponencial: delay = initial * (factor ^ attempt)
+    const baseDelay = config.initialDelayMs * Math.pow(config.factor, attemptNumber - 1);
     
-    // Aplicar un límite máximo al retraso
-    const cappedDelay = Math.min(exponentialDelay, config.maxDelayMs);
+    // Aplicar jitter para evitar sincronización de reintentos entre múltiples clientes
+    // Fórmula: baseDelay * (1 - jitter/2 + jitter*random)
+    const jitterRange = config.jitter * baseDelay;
+    const jitterOffset = (Math.random() * jitterRange) - (jitterRange / 2);
     
-    // Aplicar jitter (aleatorización) para evitar thundering herd
-    const jitterRange = cappedDelay * config.jitter;
-    const jitter = Math.random() * jitterRange - (jitterRange / 2);
+    // Aplicar jitter al delay base
+    let delay = Math.max(baseDelay + jitterOffset, 0);
     
-    return Math.max(0, Math.floor(cappedDelay + jitter));
+    // Limitar al máximo permitido
+    delay = Math.min(delay, config.maxDelayMs);
+    
+    logger.debug(`Calculado retraso para reintento ${attemptNumber}: ${Math.floor(delay)}ms (base=${baseDelay}ms, jitter=${jitterOffset.toFixed(2)}ms)`, 'Retry');
+    
+    return Math.floor(delay);
 }
 
 /**

@@ -10,10 +10,21 @@ const { fetchRankingData } = require('./src/scraper');
 const { initPrefetch, prefetchAllServers } = require('./src/prefetch');
 const apiRoutes = require('./src/routes');
 const logger = require('./src/logger');
+const { createRateLimiter } = require('./src/rateLimit');
+const { initDatabase } = require('./src/database');
 
 // Inicializar la aplicación Express
 const app = express();
 const port = CONFIG.PORT || 3000;
+
+// Inicializar la base de datos al inicio
+initDatabase()
+    .then(() => {
+        logger.success('Base de datos inicializada correctamente', 'Sistema');
+    })
+    .catch(err => {
+        logger.error(`Error al inicializar la base de datos: ${err.message}`, 'Sistema');
+    });
 
 // Banner de inicio
 const showBanner = () => {
@@ -30,6 +41,9 @@ const showBanner = () => {
 
 // Middleware para analizar JSON en solicitudes
 app.use(express.json());
+
+// Middleware para rate limiting
+app.use(createRateLimiter());
 
 // Middleware para registrar todas las solicitudes
 app.use((req, res, next) => {

@@ -43,11 +43,33 @@ function initDatabase() {
             }
             
             try {
+                // Crear tablas base
                 await createTables();
+                
+                // Verificar si es necesario actualizar el esquema a v2
+                const schemaVersion = await getSchemaVersion();
+                
+                if (schemaVersion < 2) {
+                    logger.info(`Detectada versión de esquema ${schemaVersion}, actualizando a v2.0...`, 'Database');
+                    
+                    try {
+                        // Actualizar el esquema
+                        await updateDatabaseSchema();
+                        
+                        // Actualizar la versión del esquema
+                        await updateSchemaVersion(2);
+                        
+                        logger.success('Esquema de base de datos actualizado a v2.0', 'Database');
+                    } catch (updateError) {
+                        logger.error(`Error al actualizar el esquema: ${updateError.message}`, 'Database');
+                        // Continuamos a pesar del error, usando el esquema original
+                    }
+                }
+                
                 logger.success('Base de datos inicializada correctamente', 'Database');
                 resolve(db);
             } catch (error) {
-                logger.error(`Error al crear las tablas: ${error.message}`, 'Database');
+                logger.error(`Error al inicializar la base de datos: ${error.message}`, 'Database');
                 reject(error);
             }
         });
@@ -175,21 +197,65 @@ function createTables() {
  * @param {Array} rankings - Array con los datos del ranking
  * @param {string} server - Nombre del servidor
  * @param {string} source - Fuente de los datos
+ * @param {Object} options - Opciones adicionales
  * @returns {Promise<Object>} Información del snapshot insertado
  */
-async function insertRankingSnapshot(rankings, server, source = 'scraper') {
+async function insertRankingSnapshot(rankings, server, source = 'scraper', options = {}) {
     if (!rankings || !Array.isArray(rankings) || rankings.length === 0) {
         throw new Error('No se proporcionaron datos de ranking válidos');
     }
 
+    // Obtener opciones
+    const { 
+        validationStrategy = ValidationErrorStrategies.DEFAULT_VALUE,
+        skipDuplicates = true,
+        errorThreshold = 0.2 // 20% de errores es el máximo aceptable
+    } = options;
+
     // Validar los datos antes de insertarlos
     let validatedRankings;
     try {
-        validatedRankings = validatePlayerRankings(rankings, ValidationErrorStrategies.DEFAULT_VALUE);
-        logger.info(`Datos de ranking validados: ${validatedRankings.length} registros`, 'Database');
+        // Intentar con retry y reparación automática para mejor resiliencia
+        validatedRankings = await validateWithRetry(
+            (data) => validatePlayerRankings(data, validationStrategy),
+            rankings,
+            validationStrategy,
+            { maxRetries: 2 }
+        );
+
+        // Verificar umbral de errores
+        const invalidCount = rankings.length - validatedRankings.length;
+        const errorRate = invalidCount / rankings.length;
+        
+        if (errorRate > errorThreshold) {
+            // Si hay demasiados errores, enviar a la cola para revisión
+            logger.alert(`Demasiados errores de validación (${invalidCount} de ${rankings.length}, ${(errorRate * 100).toFixed(1)}%). Enviando a cola de errores.`, 'Database');
+            
+            errorQueue.enqueue(
+                errorQueue.ErrorTypes.VALIDATION_ERROR,
+                { rankings, server, errorRate },
+                `Umbral de errores superado (${(errorRate * 100).toFixed(1)}%)`,
+                errorQueue.ErrorActions.QUARANTINE,
+                { source }
+            );
+            
+            // Lanzar error pero incluir los datos válidos para poder usarlos
+            const err = new Error(`Umbral de errores de validación superado (${(errorRate * 100).toFixed(1)}%)`);
+            err.validData = validatedRankings;
+            err.errorRate = errorRate;
+            throw err;
+        }
+        
+        logger.info(`Datos de ranking validados: ${validatedRankings.length} registros (${(errorRate * 100).toFixed(1)}% de errores)`, 'Database');
     } catch (error) {
-        logger.error(`Error en la validación de datos: ${error.message}`, 'Database');
-        throw error;
+        if (error.validData) {
+            // Si el error incluye datos válidos, podemos continuar con ellos
+            logger.warn(`Continuando con ${error.validData.length} registros válidos a pesar de errores de validación`, 'Database');
+            validatedRankings = error.validData;
+        } else {
+            logger.error(`Error en la validación de datos: ${error.message}`, 'Database');
+            throw error;
+        }
     }
 
     // Generar hash para comparación rápida de datos
@@ -210,27 +276,60 @@ async function insertRankingSnapshot(rankings, server, source = 'scraper') {
                 const snapshotId = snapshotResult.lastID;
                 
                 // 2. Procesar cada entrada del ranking
+                let insertedCount = 0;
+                let skippedCount = 0;
+                let errorCount = 0;
+                
                 for (const entry of validatedRankings) {
-                    // 2.1 Buscar o crear el personaje
-                    const characterResult = await getOrCreateCharacter(entry.character, entry.class, server, timestamp);
-                    const characterId = characterResult.id;
-                    
-                    // 2.2 Insertar la entrada del ranking
-                    await runAsync(
-                        `INSERT INTO ranking_entries (snapshot_id, character_id, rank, clan, power_score, timestamp) VALUES (?, ?, ?, ?, ?, ?)`,
-                        [snapshotId, characterId, entry.rank, entry.clan || '', entry.powerScore, timestamp]
-                    );
+                    try {
+                        // 2.1 Buscar o crear el personaje
+                        const characterResult = await getOrCreateCharacter(entry.character, entry.class, server, timestamp);
+                        const characterId = characterResult.id;
+                        
+                        // 2.2 Verificar si ya existe esta entrada para evitar duplicados
+                        if (skipDuplicates) {
+                            const existingEntry = await getAsync(
+                                `SELECT id FROM ranking_entries 
+                                 WHERE snapshot_id = ? AND character_id = ?`,
+                                [snapshotId, characterId]
+                            );
+                            
+                            if (existingEntry) {
+                                skippedCount++;
+                                continue;
+                            }
+                        }
+                        
+                        // 2.3 Insertar la entrada del ranking
+                        await runAsync(
+                            `INSERT INTO ranking_entries (snapshot_id, character_id, rank, clan, power_score, timestamp) 
+                             VALUES (?, ?, ?, ?, ?, ?)`,
+                            [snapshotId, characterId, entry.rank, entry.clan || '', entry.powerScore, timestamp]
+                        );
+                        
+                        insertedCount++;
+                    } catch (entryError) {
+                        // Manejo individualizado de errores para cada entrada
+                        errorCount++;
+                        logger.error(`Error al procesar entrada de ranking para ${entry.character}: ${entryError.message}`, 'Database');
+                        
+                        // No rechazamos toda la operación por un error en una entrada
+                        continue;
+                    }
                 }
                 
                 // Confirmar la transacción
                 db.run('COMMIT');
                 
-                logger.success(`Snapshot de ranking insertado correctamente. ID: ${snapshotId}, Registros: ${validatedRankings.length}`, 'Database');
+                logger.success(`Snapshot de ranking insertado. ID: ${snapshotId}, Insertados: ${insertedCount}, Omitidos: ${skippedCount}, Errores: ${errorCount}`, 'Database');
                 resolve({
                     id: snapshotId,
                     timestamp,
                     server,
                     recordCount: validatedRankings.length,
+                    insertedCount,
+                    skippedCount,
+                    errorCount,
                     hash: dataHash
                 });
                 
@@ -632,22 +731,32 @@ async function getLatestSnapshot(filters = {}) {
  * Compara dos snapshots y devuelve las diferencias
  * @param {number} oldSnapshotId - ID del snapshot anterior
  * @param {number} newSnapshotId - ID del snapshot nuevo
+ * @param {Object} options - Opciones adicionales
  * @returns {Promise<Object>} - Diferencias encontradas
  */
-async function compareSnapshots(oldSnapshotId, newSnapshotId) {
+async function compareSnapshots(oldSnapshotId, newSnapshotId, options = {}) {
     if (!oldSnapshotId || !newSnapshotId) {
         throw new Error('Se requieren los IDs de ambos snapshots');
     }
+
+    // Procesar opciones
+    const {
+        useHash = true,              // Usar hash para comparación rápida
+        compareDetails = false,       // Comparar todos los detalles de personajes
+        compareClanChanges = true,    // Comparar cambios de clan
+        powerScoreThreshold = 1,      // % mínimo de cambio en powerScore para considerar significativo
+        rankingThreshold = 3          // # de posiciones mínimas para considerar cambio de ranking significativo
+    } = options;
     
     try {
         // Verificar que los snapshots existen
         const oldSnapshot = await getAsync(
-            `SELECT id, timestamp, server, hash FROM ranking_snapshots WHERE id = ?`,
+            `SELECT id, timestamp, server, hash, data_count FROM ranking_snapshots WHERE id = ?`,
             [oldSnapshotId]
         );
         
         const newSnapshot = await getAsync(
-            `SELECT id, timestamp, server, hash FROM ranking_snapshots WHERE id = ?`,
+            `SELECT id, timestamp, server, hash, data_count FROM ranking_snapshots WHERE id = ?`,
             [newSnapshotId]
         );
         
@@ -660,18 +769,46 @@ async function compareSnapshots(oldSnapshotId, newSnapshotId) {
             throw new Error('Los snapshots deben ser del mismo servidor');
         }
         
-        // Si los hashes son iguales, no hay diferencias
-        if (oldSnapshot.hash === newSnapshot.hash) {
+        // Si los hashes son iguales y se permite usar hash, evitamos comparación detallada
+        if (useHash && oldSnapshot.hash === newSnapshot.hash) {
             return {
                 hasChanges: false,
                 reason: 'Snapshots idénticos (mismo hash)',
                 server: oldSnapshot.server,
                 oldTimestamp: oldSnapshot.timestamp,
-                newTimestamp: newSnapshot.timestamp
+                newTimestamp: newSnapshot.timestamp,
+                comparisonMethod: 'hash'
+            };
+        }
+
+        // Verificar diferencias significativas en el número total de entradas
+        const entriesGap = Math.abs(newSnapshot.data_count - oldSnapshot.data_count);
+        const entriesPercentChange = entriesGap / oldSnapshot.data_count * 100;
+
+        // Si la diferencia en número de entradas es muy grande, optimizar el procesamiento
+        if (entriesPercentChange > 50) {
+            logger.warn(`Diferencia significativa en número de entradas (${entriesPercentChange.toFixed(1)}%). Posible reset de rankings.`, 'Database');
+            return {
+                hasChanges: true,
+                server: oldSnapshot.server,
+                oldTimestamp: oldSnapshot.timestamp,
+                newTimestamp: newSnapshot.timestamp,
+                reason: 'Cambio masivo en número de entradas',
+                comparisonMethod: 'count',
+                stats: {
+                    totalOld: oldSnapshot.data_count,
+                    totalNew: newSnapshot.data_count,
+                    entriesGap: entriesGap,
+                    entriesPercentChange: entriesPercentChange
+                }
             };
         }
         
-        // Obtener todos los personajes del snapshot antiguo
+        // Optimización: Si hay muchas entradas, podemos comparar solo un subset (ej. top 100)
+        const isLargeDataset = oldSnapshot.data_count > 500;
+        const limitClause = isLargeDataset ? 'LIMIT 100' : '';
+        
+        // Obtener los personajes de ambos snapshots
         const oldCharacters = await allAsync(`
             SELECT re.rank, c.name as character, c.class, re.clan, re.power_score as powerScore,
                    c.id as characterId
@@ -679,9 +816,9 @@ async function compareSnapshots(oldSnapshotId, newSnapshotId) {
             JOIN characters c ON c.id = re.character_id
             WHERE re.snapshot_id = ?
             ORDER BY re.rank ASC
+            ${limitClause}
         `, [oldSnapshotId]);
         
-        // Obtener todos los personajes del snapshot nuevo
         const newCharacters = await allAsync(`
             SELECT re.rank, c.name as character, c.class, re.clan, re.power_score as powerScore,
                    c.id as characterId
@@ -689,11 +826,23 @@ async function compareSnapshots(oldSnapshotId, newSnapshotId) {
             JOIN characters c ON c.id = re.character_id
             WHERE re.snapshot_id = ?
             ORDER BY re.rank ASC
+            ${limitClause}
         `, [newSnapshotId]);
         
         // Crear mapas para búsqueda eficiente
-        const oldCharMap = new Map(oldCharacters.map(c => [c.character.toLowerCase(), c]));
-        const newCharMap = new Map(newCharacters.map(c => [c.character.toLowerCase(), c]));
+        const oldCharMap = new Map();
+        const newCharMap = new Map();
+        
+        // Usar un índice normalizado para comparación insensible a mayúsculas/minúsculas
+        oldCharacters.forEach(c => {
+            const key = c.character.toLowerCase();
+            oldCharMap.set(key, c);
+        });
+        
+        newCharacters.forEach(c => {
+            const key = c.character.toLowerCase();
+            newCharMap.set(key, c);
+        });
         
         // Encontrar personajes nuevos
         const newEntries = newCharacters.filter(c => 
@@ -707,82 +856,174 @@ async function compareSnapshots(oldSnapshotId, newSnapshotId) {
         
         // Encontrar personajes que cambiaron
         const changedEntries = [];
+        const significantChanges = [];
         
         newCharMap.forEach((newChar, name) => {
             const oldChar = oldCharMap.get(name);
             if (oldChar) {
                 const changes = {};
                 let hasChanges = false;
+                let hasSignificantChanges = false;
                 
                 // Comparar rank
                 if (oldChar.rank !== newChar.rank) {
+                    const rankChange = oldChar.rank - newChar.rank; // positivo = subió, negativo = bajó
                     changes.rank = {
                         old: oldChar.rank,
                         new: newChar.rank,
-                        change: oldChar.rank - newChar.rank // positivo = subió, negativo = bajó
+                        change: rankChange,
+                        isSignificant: Math.abs(rankChange) >= rankingThreshold
                     };
                     hasChanges = true;
+                    if (Math.abs(rankChange) >= rankingThreshold) {
+                        hasSignificantChanges = true;
+                    }
                 }
                 
-                // Comparar clan
-                if (oldChar.clan !== newChar.clan) {
+                // Comparar clan si está activada la opción
+                if (compareClanChanges && oldChar.clan !== newChar.clan) {
                     changes.clan = {
-                        old: oldChar.clan,
-                        new: newChar.clan
+                        old: oldChar.clan || '',
+                        new: newChar.clan || '',
+                        changed: true
                     };
                     hasChanges = true;
+                    // Cambio de clan siempre es significativo
+                    hasSignificantChanges = true;
                 }
                 
                 // Comparar powerScore
                 if (oldChar.powerScore !== newChar.powerScore) {
+                    const absChange = newChar.powerScore - oldChar.powerScore;
+                    const percentChange = ((newChar.powerScore - oldChar.powerScore) / oldChar.powerScore) * 100;
+                    
                     changes.powerScore = {
                         old: oldChar.powerScore,
                         new: newChar.powerScore,
-                        change: newChar.powerScore - oldChar.powerScore,
-                        percentChange: ((newChar.powerScore - oldChar.powerScore) / oldChar.powerScore) * 100
+                        change: absChange,
+                        percentChange: percentChange,
+                        isSignificant: Math.abs(percentChange) >= powerScoreThreshold
                     };
                     hasChanges = true;
+                    if (Math.abs(percentChange) >= powerScoreThreshold) {
+                        hasSignificantChanges = true;
+                    }
                 }
                 
-                // Comparar clase (podría haber cambiado si antes era null y ahora se conoce)
+                // Comparar clase solo si al menos uno de los valores no es nulo
                 if (oldChar.class !== newChar.class && (oldChar.class || newChar.class)) {
                     changes.class = {
                         old: oldChar.class || 'Desconocido',
-                        new: newChar.class || 'Desconocido'
+                        new: newChar.class || 'Desconocido',
+                        changed: true
                     };
                     hasChanges = true;
+                    // Cambio de clase siempre es significativo
+                    hasSignificantChanges = true;
                 }
                 
                 if (hasChanges) {
-                    changedEntries.push({
+                    const characterChange = {
                         character: newChar.character,
                         characterId: newChar.characterId,
+                        hasSignificantChanges,
                         changes
-                    });
+                    };
+                    
+                    changedEntries.push(characterChange);
+                    
+                    if (hasSignificantChanges) {
+                        significantChanges.push(characterChange);
+                    }
                 }
             }
         });
         
+        // Si se solicita comparación de detalles, obtenerlos para los personajes que cambiaron significativamente
+        if (compareDetails && significantChanges.length > 0) {
+            // Limitar a máximo 20 personajes para evitar sobrecarga
+            const characterIds = significantChanges
+                .slice(0, 20)
+                .map(c => c.characterId);
+            
+            // Obtener detalles
+            const detailsPromises = characterIds.map(async (characterId) => {
+                const details = await getAsync(`
+                    SELECT c.name, c.class, cd.*
+                    FROM character_details cd
+                    JOIN characters c ON c.id = cd.character_id
+                    WHERE cd.character_id = ?
+                    ORDER BY cd.timestamp DESC
+                    LIMIT 1
+                `, [characterId]);
+                
+                return details;
+            });
+            
+            const characterDetails = await Promise.all(detailsPromises);
+            
+            // Agregar detalles a los resultados
+            if (characterDetails.length > 0) {
+                // Crear un índice para rápido acceso
+                const detailsMap = new Map();
+                characterDetails.forEach(detail => {
+                    if (detail) detailsMap.set(detail.character_id, detail);
+                });
+                
+                // Asociar detalles a los personajes que cambiaron
+                significantChanges.forEach(change => {
+                    const detail = detailsMap.get(change.characterId);
+                    if (detail) {
+                        change.details = detail;
+                    }
+                });
+            }
+        }
+        
         // Calcular estadísticas generales
         const timeGap = new Date(newSnapshot.timestamp) - new Date(oldSnapshot.timestamp);
         const timeGapHours = timeGap / (1000 * 60 * 60);
+        const timeGapDays = timeGapHours / 24;
+        
+        // Calcular estadísticas de los cambios
+        let totalPowerScoreIncrease = 0;
+        let charactersWithPowerScoreIncrease = 0;
+        
+        changedEntries.forEach(entry => {
+            if (entry.changes.powerScore && entry.changes.powerScore.change > 0) {
+                totalPowerScoreIncrease += entry.changes.powerScore.change;
+                charactersWithPowerScoreIncrease++;
+            }
+        });
+        
+        const avgPowerScoreIncrease = charactersWithPowerScoreIncrease > 0 
+            ? totalPowerScoreIncrease / charactersWithPowerScoreIncrease 
+            : 0;
         
         return {
-            hasChanges: true,
+            hasChanges: newEntries.length > 0 || removedEntries.length > 0 || changedEntries.length > 0,
             server: oldSnapshot.server,
             oldTimestamp: oldSnapshot.timestamp,
             newTimestamp: newSnapshot.timestamp,
             timeGapHours,
+            timeGapDays,
+            comparisonMethod: 'detailed',
+            comparisonSize: isLargeDataset ? 'partial' : 'full',
             stats: {
-                totalOld: oldCharacters.length,
-                totalNew: newCharacters.length,
+                totalOld: oldSnapshot.data_count,
+                totalNew: newSnapshot.data_count,
+                compareCount: oldCharacters.length,
                 newEntries: newEntries.length,
                 removedEntries: removedEntries.length,
-                changedEntries: changedEntries.length
+                changedEntries: changedEntries.length,
+                significantChanges: significantChanges.length,
+                avgPowerScoreIncrease,
+                changeRate: changedEntries.length / oldCharacters.length * 100
             },
-            newEntries,
-            removedEntries,
-            changedEntries
+            newEntries: newEntries.slice(0, 50), // Limitar para no sobrecargar la respuesta
+            removedEntries: removedEntries.slice(0, 50), // Limitar para no sobrecargar la respuesta
+            significantChanges, // Ya está limitado si se solicitan detalles
+            changedEntries: isLargeDataset ? [] : changedEntries // Solo incluir todos si no es un dataset grande
         };
         
     } catch (error) {
@@ -987,6 +1228,247 @@ function closeDatabase() {
     });
 }
 
+/**
+ * Actualiza la estructura de la base de datos para la versión 2.0
+ * Añade nuevas tablas y modifica existentes para optimización
+ * @returns {Promise<void>}
+ */
+async function updateDatabaseSchema() {
+    logger.info('Iniciando actualización del esquema de base de datos a v2.0...', 'Database');
+    
+    return new Promise((resolve, reject) => {
+        db.serialize(async () => {
+            try {
+                // Iniciar transacción
+                db.run('BEGIN TRANSACTION');
+                
+                // 1. Crear nueva tabla para almacenar información básica de personajes con índices optimizados
+                db.run(`
+                    CREATE TABLE IF NOT EXISTS characters_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL,
+                        class TEXT,
+                        server TEXT NOT NULL,
+                        region TEXT,
+                        last_seen TEXT NOT NULL,
+                        first_seen TEXT NOT NULL,
+                        data_status INTEGER DEFAULT 0,
+                        UNIQUE(name, server)
+                    )
+                `, (err) => {
+                    if (err) {
+                        logger.error(`Error al crear tabla characters_new: ${err.message}`, 'Database');
+                        throw err;
+                    }
+                });
+                
+                // 2. Crear tabla para las estadísticas base de los personajes
+                db.run(`
+                    CREATE TABLE IF NOT EXISTS character_stats (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        character_id INTEGER NOT NULL,
+                        level INTEGER NOT NULL,
+                        prestige_level INTEGER DEFAULT 0,
+                        timestamp TEXT NOT NULL,
+                        FOREIGN KEY (character_id) REFERENCES characters(id)
+                    )
+                `, (err) => {
+                    if (err) {
+                        logger.error(`Error al crear tabla character_stats: ${err.message}`, 'Database');
+                        throw err;
+                    }
+                });
+                
+                // 3. Crear tabla para puntuaciones de personaje (separada para facilitar análisis)
+                db.run(`
+                    CREATE TABLE IF NOT EXISTS character_scores (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        character_id INTEGER NOT NULL,
+                        equipment_score INTEGER DEFAULT 0,
+                        spirit_score INTEGER DEFAULT 0,
+                        energy_score INTEGER DEFAULT 0,
+                        magical_stone_score INTEGER DEFAULT 0,
+                        codex_score INTEGER DEFAULT 0,
+                        trophy_score INTEGER DEFAULT 0,
+                        ethics INTEGER DEFAULT 0,
+                        timestamp TEXT NOT NULL,
+                        FOREIGN KEY (character_id) REFERENCES characters(id)
+                    )
+                `, (err) => {
+                    if (err) {
+                        logger.error(`Error al crear tabla character_scores: ${err.message}`, 'Database');
+                        throw err;
+                    }
+                });
+                
+                // 4. Crear tabla para logros de los personajes
+                db.run(`
+                    CREATE TABLE IF NOT EXISTS character_achievements (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        character_id INTEGER NOT NULL,
+                        achievement_id INTEGER NOT NULL,
+                        achievement_name TEXT NOT NULL,
+                        timestamp TEXT NOT NULL,
+                        FOREIGN KEY (character_id) REFERENCES characters(id)
+                    )
+                `, (err) => {
+                    if (err) {
+                        logger.error(`Error al crear tabla character_achievements: ${err.message}`, 'Database');
+                        throw err;
+                    }
+                });
+                
+                // 5. Migrar datos de la tabla characters existente (si hay datos)
+                db.run(`
+                    INSERT OR IGNORE INTO characters_new (id, name, class, server, last_seen, first_seen)
+                    SELECT id, name, class, server, last_seen, first_seen FROM characters
+                `, (err) => {
+                    if (err) {
+                        logger.error(`Error al migrar datos a characters_new: ${err.message}`, 'Database');
+                        throw err;
+                    }
+                });
+                
+                // 6. Extraer la región del servidor y actualizarla en la nueva tabla
+                db.run(`
+                    UPDATE characters_new
+                    SET region = SUBSTR(server, 1, INSTR(server, '0') - 1)
+                    WHERE region IS NULL
+                `, (err) => {
+                    if (err) {
+                        logger.error(`Error al actualizar región en characters_new: ${err.message}`, 'Database');
+                        throw err;
+                    }
+                });
+                
+                // 7. Migrar datos de character_details a las nuevas tablas
+                // Primero, migrar estadísticas base
+                db.run(`
+                    INSERT INTO character_stats (character_id, level, prestige_level, timestamp)
+                    SELECT character_id, level, prestige_level, timestamp
+                    FROM character_details
+                `, (err) => {
+                    if (err) {
+                        logger.warn(`Error al migrar estadísticas base: ${err.message}`, 'Database');
+                        // No lanzar error, continuar con las demás migraciones
+                    }
+                });
+                
+                // Luego, migrar puntuaciones
+                db.run(`
+                    INSERT INTO character_scores (
+                        character_id, equipment_score, spirit_score, energy_score, 
+                        magical_stone_score, codex_score, trophy_score, ethics, timestamp
+                    )
+                    SELECT 
+                        character_id, equipment_score, spirit_score, energy_score, 
+                        magical_stone_score, codex_score, trophy_score, ethics, timestamp
+                    FROM character_details
+                `, (err) => {
+                    if (err) {
+                        logger.warn(`Error al migrar puntuaciones: ${err.message}`, 'Database');
+                        // No lanzar error, continuar
+                    }
+                });
+                
+                // 8. Crear índices para optimizar consultas en las nuevas tablas
+                db.run(`CREATE INDEX IF NOT EXISTS idx_character_stats_character_id ON character_stats(character_id)`, (err) => {
+                    if (err) logger.warn(`Error al crear índice idx_character_stats_character_id: ${err.message}`, 'Database');
+                });
+                
+                db.run(`CREATE INDEX IF NOT EXISTS idx_character_scores_character_id ON character_scores(character_id)`, (err) => {
+                    if (err) logger.warn(`Error al crear índice idx_character_scores_character_id: ${err.message}`, 'Database');
+                });
+                
+                db.run(`CREATE INDEX IF NOT EXISTS idx_character_achievements_character_id ON character_achievements(character_id)`, (err) => {
+                    if (err) logger.warn(`Error al crear índice idx_character_achievements_character_id: ${err.message}`, 'Database');
+                });
+                
+                db.run(`CREATE INDEX IF NOT EXISTS idx_characters_new_name_server ON characters_new(name, server)`, (err) => {
+                    if (err) logger.warn(`Error al crear índice idx_characters_new_name_server: ${err.message}`, 'Database');
+                });
+                
+                db.run(`CREATE INDEX IF NOT EXISTS idx_characters_new_region ON characters_new(region)`, (err) => {
+                    if (err) logger.warn(`Error al crear índice idx_characters_new_region: ${err.message}`, 'Database');
+                });
+                
+                // Confirmar la transacción
+                db.run('COMMIT', (err) => {
+                    if (err) {
+                        logger.error(`Error al confirmar la transacción: ${err.message}`, 'Database');
+                        db.run('ROLLBACK');
+                        reject(err);
+                        return;
+                    }
+                    
+                    // 9. No reemplazamos las tablas antiguas inmediatamente para mantener compatibilidad
+                    // En una versión futura, podríamos eliminar las tablas antiguas o renombrarlas
+                    
+                    logger.success('Actualización del esquema de base de datos completada', 'Database');
+                    resolve();
+                });
+                
+            } catch (error) {
+                db.run('ROLLBACK');
+                logger.error(`Error al actualizar el esquema de la base de datos: ${error.message}`, 'Database');
+                reject(error);
+            }
+        });
+    });
+}
+
+/**
+ * Obtiene la versión actual del esquema de la base de datos
+ * @returns {Promise<number>} - Versión del esquema
+ */
+async function getSchemaVersion() {
+    try {
+        // Crear tabla de control de versiones si no existe
+        await runAsync(`
+            CREATE TABLE IF NOT EXISTS schema_version (
+                id INTEGER PRIMARY KEY,
+                version INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        `);
+        
+        // Verificar la versión actual
+        const versionRow = await getAsync('SELECT version FROM schema_version ORDER BY id DESC LIMIT 1');
+        
+        if (versionRow) {
+            return versionRow.version;
+        } else {
+            // Si no hay versión registrada, asumir versión 1 e insertarla
+            await runAsync(
+                'INSERT INTO schema_version (version, updated_at) VALUES (?, ?)',
+                [1, new Date().toISOString()]
+            );
+            return 1;
+        }
+    } catch (error) {
+        logger.error(`Error al obtener la versión del esquema: ${error.message}`, 'Database');
+        return 1; // Asumir versión 1 en caso de error
+    }
+}
+
+/**
+ * Actualiza la versión del esquema de la base de datos
+ * @param {number} version - Nueva versión del esquema
+ * @returns {Promise<void>}
+ */
+async function updateSchemaVersion(version) {
+    try {
+        await runAsync(
+            'INSERT INTO schema_version (version, updated_at) VALUES (?, ?)',
+            [version, new Date().toISOString()]
+        );
+        logger.info(`Versión del esquema actualizada a ${version}`, 'Database');
+    } catch (error) {
+        logger.error(`Error al actualizar la versión del esquema: ${error.message}`, 'Database');
+        throw error;
+    }
+}
+
 module.exports = {
     initDatabase,
     insertRankingSnapshot,
@@ -997,5 +1479,6 @@ module.exports = {
     getLatestSnapshot,
     compareSnapshots,
     getCharacterDetails,
-    closeDatabase
+    closeDatabase,
+    updateDatabaseSchema
 };

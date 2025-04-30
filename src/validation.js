@@ -13,7 +13,8 @@ const ValidationErrorStrategies = {
     LOG_ONLY: 'log_only',     // Solo registra el error pero acepta el valor inválido
     DEFAULT_VALUE: 'default', // Reemplaza el valor inválido por uno predeterminado
     NULL_VALUE: 'null',       // Reemplaza el valor inválido por null
-    QUEUE_ERROR: 'queue'      // Envía a la cola de errores para procesamiento posterior
+    QUEUE_ERROR: 'queue',     // Envía a la cola de errores para procesamiento posterior
+    REPAIR_VALUE: 'repair'    // Intenta reparar automáticamente el valor inválido
 };
 
 // Validadores individuales
@@ -22,31 +23,60 @@ const validators = {
      * Valida que un valor sea un número entero
      * @param {any} value - Valor a validar
      * @param {Object} options - Opciones adicionales (min, max)
-     * @returns {Object} - Resultado de la validación {valid, value, error}
+     * @returns {Object} Resultado de la validación {valid, value, error}
      */
     integer: (value, options = {}) => {
-        const parsed = parseInt(value);
-        const min = options.min !== undefined ? options.min : -Infinity;
-        const max = options.max !== undefined ? options.max : Infinity;
+        // Procesar opciones
+        const min = options.min !== undefined ? options.min : Number.MIN_SAFE_INTEGER;
+        const max = options.max !== undefined ? options.max : Number.MAX_SAFE_INTEGER;
         const defaultValue = options.default !== undefined ? options.default : 0;
         
-        if (isNaN(parsed)) {
+        // Si es undefined o null, usar el valor predeterminado
+        if (value === undefined || value === null) {
             return {
                 valid: false,
                 value: defaultValue,
-                error: `El valor "${value}" no es un número entero válido`
+                error: 'Valor nulo o indefinido'
             };
         }
         
-        if (parsed < min || parsed > max) {
+        let num;
+        
+        // Si ya es un número, usarlo directamente
+        if (typeof value === 'number' && !isNaN(value)) {
+            num = Math.floor(value); // Asegurar que sea entero
+        } else {
+            // Intentar convertir a número
+            num = parseInt(value, 10);
+        }
+        
+        // Comprobar si la conversión fue exitosa
+        if (isNaN(num)) {
             return {
                 valid: false,
                 value: defaultValue,
-                error: `El valor ${parsed} está fuera de rango (min: ${min}, max: ${max})`
+                error: `No es un número entero válido: ${value}`
             };
         }
         
-        return { valid: true, value: parsed };
+        // Validar rango
+        if (num < min) {
+            return {
+                valid: false,
+                value: Math.max(defaultValue, min),
+                error: `Valor ${num} menor que el mínimo permitido (${min})`
+            };
+        }
+        
+        if (num > max) {
+            return {
+                valid: false,
+                value: Math.min(defaultValue, max),
+                error: `Valor ${num} mayor que el máximo permitido (${max})`
+            };
+        }
+        
+        return { valid: true, value: num };
     },
     
     /**
@@ -530,20 +560,88 @@ async function processValidationErrorQueue() {
     return await errorQueue.processQueue(errorQueue.ErrorActions.FIX_AUTO, async (errorItem) => {
         try {
             // Intentar reparar datos según el tipo de error
-            const { data, type } = errorItem;
+            const { data, type, error: errorMessage } = errorItem;
             
             if (type === errorQueue.ErrorTypes.VALIDATION_ERROR) {
                 // Si es un error de tipo de dato, intentar convertir
                 if (data.field && data.value !== undefined) {
-                    // Verificar el tipo esperado y tratar de convertir
+                    // Reparación para números
                     if (data.expected && data.expected.min !== undefined) {
                         // Probablemente un número
                         const asNumber = parseFloat(data.value);
                         if (!isNaN(asNumber)) {
                             logger.info(`Reparado automáticamente: campo ${data.field} convertido a número (${data.value} -> ${asNumber})`, 'Validation');
-                            return { success: true };
+                            return { success: true, repairedValue: asNumber };
                         }
                     }
+                    
+                    // Reparación para strings demasiado largos
+                    if (data.expected && data.expected.maxLength !== undefined) {
+                        if (typeof data.value === 'string' && data.value.length > data.expected.maxLength) {
+                            const truncated = data.value.substring(0, data.expected.maxLength);
+                            logger.info(`Reparado automáticamente: campo ${data.field} truncado (${data.value.length} chars -> ${truncated.length} chars)`, 'Validation');
+                            return { success: true, repairedValue: truncated };
+                        }
+                    }
+                    
+                    // Reparación para JSON inválido
+                    if (errorMessage && errorMessage.toLowerCase().includes('json')) {
+                        try {
+                            // Si es una cadena, intentar arreglar comillas o escapado
+                            if (typeof data.value === 'string') {
+                                // Reemplazar comillas simples por dobles
+                                const fixedJson = data.value.replace(/'/g, '"');
+                                const parsed = JSON.parse(fixedJson);
+                                logger.info(`Reparado automáticamente: JSON inválido reparado para ${data.field}`, 'Validation');
+                                return { success: true, repairedValue: parsed };
+                            }
+                            // Si es un objeto, intentar convertirlo a JSON
+                            else if (typeof data.value === 'object' && data.value !== null) {
+                                return { success: true, repairedValue: data.value };
+                            }
+                        } catch (jsonError) {
+                            // No se pudo reparar el JSON
+                        }
+                    }
+                }
+            } else if (type === errorQueue.ErrorTypes.MISSING_REQUIRED_FIELD) {
+                // Para campos requeridos faltantes, usar un valor predeterminado sensato
+                if (data.field) {
+                    let defaultValue = null;
+                    
+                    // Intentar inferir un valor predeterminado basado en el nombre del campo
+                    switch (data.field.toLowerCase()) {
+                        case 'rank':
+                            defaultValue = 999; // Un valor alto por defecto
+                            break;
+                        case 'character':
+                        case 'name':
+                            defaultValue = 'Unknown_' + Math.floor(Math.random() * 1000);
+                            break;
+                        case 'class':
+                            defaultValue = 'Desconocido';
+                            break;
+                        case 'powerscore':
+                            defaultValue = 0;
+                            break;
+                        case 'level':
+                            defaultValue = 1;
+                            break;
+                        default:
+                            defaultValue = null;
+                    }
+                    
+                    if (defaultValue !== null) {
+                        logger.info(`Reparado automáticamente: campo requerido ${data.field} establecido a valor por defecto (${defaultValue})`, 'Validation');
+                        return { success: true, repairedValue: defaultValue };
+                    }
+                }
+            } else if (type === errorQueue.ErrorTypes.DATA_INCONSISTENCY) {
+                // Intentar resolver inconsistencias de datos
+                if (data.actual !== undefined && data.expected !== undefined) {
+                    logger.info(`Inconsistencia de datos detectada: ${data.actual} vs ${data.expected}`, 'Validation');
+                    // Por ahora, simplemente reportamos la inconsistencia
+                    return { success: false, error: "Inconsistencia de datos no reparable automáticamente" };
                 }
             }
             
@@ -554,6 +652,7 @@ async function processValidationErrorQueue() {
                 nextAction: errorQueue.ErrorActions.QUARANTINE 
             };
         } catch (error) {
+            logger.error(`Error al intentar reparar datos: ${error.message}`, 'Validation');
             return { success: false, error: error.message };
         }
     });
